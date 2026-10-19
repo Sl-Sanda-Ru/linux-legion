@@ -67,6 +67,95 @@ const MAIN: [(f32, f32, Row); 7] = [
     (6.0, 1.0, &[(0, "", 12.0), (0x9C, "←", 1.0), (0x9F, "↓", 1.0), (0xA1, "→", 1.0)]),
 ];
 
+/// Физическая раскладка клавиатуры. Определяется, как в Legion Toolkit, по
+/// кодам зон: `0xA9` есть только у JIS, `0xA8` — у ISO (и JIS).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum KeyboardLayout {
+    #[default]
+    Ansi,
+    Iso,
+    Jis,
+}
+
+impl KeyboardLayout {
+    pub fn detect(codes: &[u16]) -> Self {
+        if codes.contains(&0xA9) {
+            KeyboardLayout::Jis
+        } else if codes.contains(&0xA8) {
+            KeyboardLayout::Iso
+        } else {
+            KeyboardLayout::Ansi
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            KeyboardLayout::Ansi => "ANSI",
+            KeyboardLayout::Iso => "ISO",
+            KeyboardLayout::Jis => "JIS",
+        }
+    }
+
+    fn rows(self) -> &'static [(f32, f32, Row); 7] {
+        match self {
+            KeyboardLayout::Ansi => &MAIN,
+            KeyboardLayout::Iso => &ISO_MAIN,
+            KeyboardLayout::Jis => &JIS_MAIN,
+        }
+    }
+}
+
+/// ISO: высокий Enter на два ряда, `#` слева от него, `\` справа от левого Shift
+/// (коды — как в раскладке ISO у Legion Toolkit).
+const ISO_MAIN: [(f32, f32, Row); 7] = [
+    MAIN[0],
+    MAIN[1],
+    (2.0, 1.0, &[
+        (0x40, "Tab", 1.5), (0x42, "Q", 1.0), (0x43, "W", 1.0), (0x44, "E", 1.0), (0x45, "R", 1.0),
+        (0x46, "T", 1.0), (0x47, "Y", 1.0), (0x48, "U", 1.0), (0x49, "I", 1.0), (0x4A, "O", 1.0),
+        (0x4B, "P", 1.0), (0x4C, "[", 1.0), (0x4D, "]", 1.0), (0x77, "Enter", 1.5),
+    ]),
+    (3.0, 1.0, &[
+        (0x55, "Caps", 1.75), (0x6D, "A", 1.0), (0x6E, "S", 1.0), (0x58, "D", 1.0), (0x59, "F", 1.0),
+        (0x5A, "G", 1.0), (0x71, "H", 1.0), (0x72, "J", 1.0), (0x5B, "K", 1.0), (0x5C, "L", 1.0),
+        (0x5D, ";", 1.0), (0x5F, "'", 1.0), (0xA8, "#", 0.75),
+    ]),
+    (4.0, 1.0, &[
+        (0x6A, "Shift", 1.25), (0x4E, "\\", 1.0), (0x82, "Z", 1.0), (0x83, "X", 1.0), (0x6F, "C", 1.0),
+        (0x70, "V", 1.0), (0x87, "B", 1.0), (0x88, "N", 1.0), (0x73, "M", 1.0), (0x74, ",", 1.0),
+        (0x75, ".", 1.0), (0x76, "/", 1.0), (0x8D, "Shift", 2.75),
+    ]),
+    MAIN[5],
+    MAIN[6],
+];
+
+/// JIS: ¥ и узкий Backspace, @ и [ в верхнем ряду, ] у Enter, клавиши
+/// 無変換/変換/かな вокруг укороченного пробела.
+const JIS_MAIN: [(f32, f32, Row); 7] = [
+    MAIN[0],
+    (1.0, 1.0, &[
+        (0x16, "半/全", 1.0), (0x17, "1", 1.0), (0x18, "2", 1.0), (0x19, "3", 1.0), (0x1A, "4", 1.0),
+        (0x1B, "5", 1.0), (0x1C, "6", 1.0), (0x1D, "7", 1.0), (0x1E, "8", 1.0), (0x1F, "9", 1.0),
+        (0x20, "0", 1.0), (0x21, "-", 1.0), (0x22, "^", 1.0), (0xA8, "¥", 1.0), (0x38, "BS", 1.0),
+    ]),
+    (2.0, 1.0, &[
+        (0x40, "Tab", 1.5), (0x42, "Q", 1.0), (0x43, "W", 1.0), (0x44, "E", 1.0), (0x45, "R", 1.0),
+        (0x46, "T", 1.0), (0x47, "Y", 1.0), (0x48, "U", 1.0), (0x49, "I", 1.0), (0x4A, "O", 1.0),
+        (0x4B, "P", 1.0), (0x60, "@", 1.0), (0x4C, "[", 1.0), (0x77, "Enter", 1.5),
+    ]),
+    (3.0, 1.0, &[
+        (0x55, "Caps", 1.75), (0x6D, "A", 1.0), (0x6E, "S", 1.0), (0x58, "D", 1.0), (0x59, "F", 1.0),
+        (0x5A, "G", 1.0), (0x71, "H", 1.0), (0x72, "J", 1.0), (0x5B, "K", 1.0), (0x5C, "L", 1.0),
+        (0x5D, ";", 1.0), (0x5F, ":", 1.0), (0x4D, "]", 0.75),
+    ]),
+    ISO_MAIN[4],
+    (5.0, 1.0, &[
+        (0x7F, "Ctrl", 1.25), (0x80, "Fn", 1.0), (0x96, "Win", 1.0), (0x97, "Alt", 1.25), (0xA9, "無変換", 1.0),
+        (0x98, "", 3.5), (0xAA, "変換", 1.0), (0xAB, "かな", 1.0), (0x9B, "Ctrl", 1.0), (0, "", 1.0), (0x9D, "↑", 1.0),
+    ]),
+    MAIN[6],
+];
+
 /// Цифровой блок: (код, подпись, x, y, w, h), x от левого края блока.
 const NUMPAD: &[(u16, &str, f32, f32, f32, f32)] = &[
     (0x11, "Home", 0.0, 0.0, 1.0, 0.8),
@@ -122,10 +211,13 @@ pub fn build(matrix: &KeyMatrix) -> Vec<Zone> {
 
     let y0 = STRIP + STRIP_GAP;
     let x0 = STRIP + STRIP_GAP;
-    for (y, h, row) in MAIN {
+    let kb_layout = KeyboardLayout::detect(&present);
+    for &(y, h, row) in kb_layout.rows() {
         let mut x = 0.0;
         for &(code, label, w) in row {
             if code != 0 && has(code) {
+                // Enter в ISO/JIS — на два ряда.
+                let h = if code == 0x77 && kb_layout != KeyboardLayout::Ansi { 2.0 } else { h };
                 zones.push(Zone { code, label, x: x0 + x, y: y0 + y, w, h, group: Group::Keys });
             }
             x += w;
@@ -236,13 +328,13 @@ impl Preset {
 
     pub fn label(self) -> &'static str {
         match self {
-            Preset::All => "Все зоны",
-            Preset::Keyboard => "Клавиатура",
-            Preset::Case => "Корпус",
+            Preset::All => "All zones",
+            Preset::Keyboard => "Keyboard",
+            Preset::Case => "Case",
             Preset::Wasd => "WASD",
-            Preset::Arrows => "Стрелки",
-            Preset::FRow => "F-ряд",
-            Preset::Digits => "Цифры",
+            Preset::Arrows => "Arrows",
+            Preset::FRow => "F-row",
+            Preset::Digits => "Digits",
         }
     }
 }
@@ -280,10 +372,38 @@ mod tests {
 
     #[test]
     fn main_rows_have_equal_width() {
-        for (_, _, row) in MAIN.iter().take(6) {
-            let w: f32 = row.iter().map(|r| r.2).sum();
-            assert!((w - 15.0).abs() < 0.01 || w < 15.0, "строка {w}");
+        for rows in [&MAIN, &ISO_MAIN, &JIS_MAIN] {
+            for (_, _, row) in rows.iter().take(6) {
+                let w: f32 = row.iter().map(|r| r.2).sum();
+                assert!((w - 15.0).abs() < 0.01 || w < 15.0, "строка {w}");
+            }
         }
+    }
+
+    /// Клавиатура ISO/JIS: лишние клавиши ложатся на свои места, а не в
+    /// строку «неизвестных», Enter — на два ряда.
+    #[test]
+    fn iso_and_jis_keys_are_placed() {
+        assert_eq!(KeyboardLayout::detect(&matrix().codes()), KeyboardLayout::Ansi);
+        let mut iso = matrix();
+        iso.extra.push(0xA8);
+        assert_eq!(KeyboardLayout::detect(&iso.codes()), KeyboardLayout::Iso);
+        let zones = build(&iso);
+        assert!(zones.iter().all(|z| z.label != "?"));
+        assert_eq!(zones.iter().find(|z| z.code == 0xA8).map(|z| z.label), Some("#"));
+        assert_eq!(zones.iter().find(|z| z.code == 0x77).map(|z| z.h), Some(2.0));
+
+        let mut jis = matrix();
+        for r in jis.rows.iter_mut() {
+            for k in r.iter_mut().filter(|k| **k == 0x9A) {
+                *k = 0;
+            }
+        }
+        jis.extra.extend([0xA8, 0xA9, 0x60, 0xAA, 0xAB]);
+        assert_eq!(KeyboardLayout::detect(&jis.codes()), KeyboardLayout::Jis);
+        let zones = build(&jis);
+        assert!(zones.iter().all(|z| z.label != "?"), "{:?}", zones.iter().filter(|z| z.label == "?").collect::<Vec<_>>());
+        assert_eq!(zones.iter().find(|z| z.code == 0x38).map(|z| z.w), Some(1.0), "narrow Backspace");
     }
 
     #[test]

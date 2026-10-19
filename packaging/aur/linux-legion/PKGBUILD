@@ -7,7 +7,8 @@ arch=('x86_64')
 url="https://github.com/VitaminDB/linux-legion"
 license=('MIT')
 depends=('fontconfig' 'freetype2' 'libxkbcommon' 'wayland' 'vulkan-icd-loader' 'hicolor-icon-theme' 'gcc-libs' 'glibc')
-optdepends=('libx11: X11 session' 'libxcursor: cursors in X11' 'nvidia-utils: NVIDIA GPU monitoring')
+optdepends=('libx11: X11 session' 'libxcursor: cursors in X11' 'nvidia-utils: NVIDIA GPU monitoring'
+            'libnotify: desktop notifications from the service')
 makedepends=('cargo' 'git')
 options=('!lto' '!debug')
 install=linux-legion.install

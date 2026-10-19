@@ -19,8 +19,8 @@ pub fn view(ctx: AppCtx) -> impl Widget {
         .gap(18.0)
         .cross_axis_alignment(CrossAxisAlignment::Stretch)
         .child(page_header(
-            "Производительность",
-            "Режим питания меняет лимиты мощности и работу вентиляторов. На клавиатуре — Fn+Q.",
+            "Performance",
+            "The power mode changes the power limits and how the fans behave. On the keyboard: Fn+Q.",
         ))
         .child(reactive_box(move || {
             let st = c.sink.power.get();
@@ -30,9 +30,10 @@ pub fn view(ctx: AppCtx) -> impl Widget {
                 crate::ui::widgets::nothing()
             }
         }))
-        .child(card("Режим питания", "", modes(ctx.clone())))
+        .child(card("Power mode", "", modes(ctx.clone())))
         .child(custom_notice(ctx.clone()))
         .child(tunables(ctx.clone()))
+        .child(presets(ctx.clone()))
         .child(cpu(ctx.clone()))
         .child(fans(ctx.clone()))
         .child(autoapply(ctx))
@@ -92,13 +93,13 @@ fn custom_notice(ctx: AppCtx) -> impl Widget {
                         .child(Icon::new(icons::INFO).class("banner-icon-info"))
                         .child(
                             Text::new(
-                                "Лимиты мощности и обороты вентиляторов прошивка разрешает менять только в режиме «Свой». \
-                                 В остальных режимах они показаны для справки.",
+                                "The firmware allows the power limits and fan speeds to be changed only in Custom mode. \
+                                 In the other modes they are shown for reference.",
                             )
                             .class("row-desc grow"),
                         )
                         .child(
-                            Button::new("Включить «Свой»")
+                            Button::new("Switch to Custom")
                                 .icon(icons::MODE_CUSTOM)
                                 .on_click(move || c.send(Job::SetPowerMode(PowerMode::Custom)))
                                 .class("btn-primary"),
@@ -118,17 +119,26 @@ fn tunables(ctx: AppCtx) -> impl Widget {
         Row::new()
             .gap(8.0)
             .child(
-                Button::new("Максимум")
+                Button::new("Maximum")
                     .icon(icons::BOLT)
                     .disabled(!custom)
                     .on_click(move || {
-                        let map = cm.sink.tunables.get_untracked().into_iter().map(|t| (t.name, t.max)).collect();
+                        // Атрибуты с диапазоном 0–0 только читаются: их `max`
+                        // равен нулю, и запись обнулила бы лимит.
+                        let map = cm
+                            .sink
+                            .tunables
+                            .get_untracked()
+                            .into_iter()
+                            .filter(|t| t.writable && t.min < t.max)
+                            .map(|t| (t.name, t.max))
+                            .collect();
                         cm.tun_edit.set(map);
                     })
                     .class("btn-ghost"),
             )
             .child(
-                Button::new("По умолчанию")
+                Button::new("Defaults")
                     .icon(icons::RESTART)
                     .disabled(!custom)
                     .on_click(move || {
@@ -137,6 +147,7 @@ fn tunables(ctx: AppCtx) -> impl Widget {
                             .tunables
                             .get_untracked()
                             .into_iter()
+                            .filter(|t| t.writable && t.min < t.max)
                             .filter_map(|t| t.default.map(|d| (t.name, d)))
                             .collect();
                         cr.tun_edit.set(map);
@@ -144,7 +155,7 @@ fn tunables(ctx: AppCtx) -> impl Widget {
                     .class("btn-ghost"),
             )
             .child(
-                Button::new("Применить")
+                Button::new("Apply")
                     .icon(icons::CHECK)
                     .disabled(!custom || !dirty)
                     .on_click(move || {
@@ -158,13 +169,13 @@ fn tunables(ctx: AppCtx) -> impl Widget {
     };
     card_with(
         icons::BOLT,
-        "Лимиты мощности",
+        "Power limits",
         actions,
         reactive_box(move || {
             let list = ctx.sink.tunables.get();
             if list.is_empty() {
                 return Box::new(
-                    Text::new("Драйвер lenovo-wmi-other не отдаёт настраиваемых лимитов на этой модели.").class("muted"),
+                    Text::new("The lenovo-wmi-other driver exposes no tunable limits on this model.").class("muted"),
                 );
             }
             let custom = ctx.power_mode() == Some(PowerMode::Custom);
@@ -173,35 +184,41 @@ fn tunables(ctx: AppCtx) -> impl Widget {
             for t in list {
                 let v = edit.get(&t.name).copied().unwrap_or(t.value);
                 let changed = v != t.value;
-                let c = ctx.clone();
-                let name = t.name.clone();
                 let value = if changed { format!("{} → {v} {}", t.value, t.unit) } else { format!("{v} {}", t.unit) };
-                col = col.child(
-                    Column::new()
+                // Прошивка отдаёт часть атрибутов с диапазоном 0–0: значение
+                // только читается, ползунок для него бессмыслен.
+                let fixed = t.min >= t.max;
+                let mut row =
+                    Column::new().gap(8.0).cross_axis_alignment(CrossAxisAlignment::Stretch).child(labeled(&t.label, value));
+                if !fixed {
+                    let c = ctx.clone();
+                    let name = t.name.clone();
+                    row = row.child(
+                        Slider::new()
+                            .value(v as f32)
+                            .range(t.min as f32, t.max as f32)
+                            .step(t.step as f32)
+                            .disabled(!custom || !t.writable)
+                            .on_change(move |x| {
+                                let x = x.round() as i64;
+                                let mut m = c.tun_edit.get_untracked();
+                                m.insert(name.clone(), x);
+                                c.tun_edit.set(m);
+                            })
+                            .class("wide-slider"),
+                    );
+                }
+                let scale = if fixed {
+                    "fixed by the firmware".to_string()
+                } else {
+                    format!("{}–{} {}", t.min, t.max, t.unit)
+                };
+                col = col.child(row.child(
+                    Row::new()
                         .gap(8.0)
-                        .cross_axis_alignment(CrossAxisAlignment::Stretch)
-                        .child(labeled(&t.label, value))
-                        .child(
-                            Slider::new()
-                                .value(v as f32)
-                                .range(t.min as f32, t.max as f32)
-                                .step(t.step as f32)
-                                .disabled(!custom || !t.writable)
-                                .on_change(move |x| {
-                                    let x = x.round() as i64;
-                                    let mut m = c.tun_edit.get_untracked();
-                                    m.insert(name.clone(), x);
-                                    c.tun_edit.set(m);
-                                })
-                                .class("wide-slider"),
-                        )
-                        .child(
-                            Row::new()
-                                .gap(8.0)
-                                .child(Text::new(t.hint.clone()).class("row-desc grow"))
-                                .child(Text::new(format!("{}–{} {}", t.min, t.max, t.unit)).class("scale-label")),
-                        ),
-                );
+                        .child(Text::new(t.hint.clone()).class("row-desc grow"))
+                        .child(Text::new(scale).class("scale-label")),
+                ));
             }
             Box::new(col)
         }),
@@ -217,7 +234,7 @@ fn fans(ctx: AppCtx) -> impl Widget {
         Row::new()
             .gap(8.0)
             .child(
-                Button::new("Все — авто")
+                Button::new("All auto")
                     .icon(icons::AUTO)
                     .disabled(!custom)
                     .on_click(move || {
@@ -227,7 +244,7 @@ fn fans(ctx: AppCtx) -> impl Widget {
                     .class("btn-ghost"),
             )
             .child(
-                Button::new("Применить")
+                Button::new("Apply")
                     .icon(icons::CHECK)
                     .disabled(!custom || !dirty)
                     .on_click(move || {
@@ -241,12 +258,12 @@ fn fans(ctx: AppCtx) -> impl Widget {
     };
     card_with(
         icons::FAN,
-        "Вентиляторы",
+        "Fans",
         actions,
         reactive_box(move || {
             let list = ctx.sink.fans.get();
             if list.is_empty() {
-                return Box::new(Text::new("Вентиляторы не найдены (нужен драйвер lenovo-wmi-other).").class("muted"));
+                return Box::new(Text::new("No fans found (the lenovo-wmi-other driver is required).").class("muted"));
             }
             let custom = ctx.power_mode() == Some(PowerMode::Custom);
             let edit = ctx.fan_edit.get();
@@ -254,18 +271,34 @@ fn fans(ctx: AppCtx) -> impl Widget {
             let mut col = Column::new().gap(22.0).cross_axis_alignment(CrossAxisAlignment::Stretch);
             let c = ctx.clone();
             let desc = if saved.fan_curve && !(svc.enabled && svc.active) {
-                "Включено, но служба не запущена — включите её в разделе «Служба» ниже."
+                "Enabled, but the service is not running — turn it on in the Service section below."
             } else if saved.fan_curve {
-                "Служба ведёт вентиляторы по температуре CPU и видеокарты во всех режимах; \
-                 в «Свой» заданные здесь обороты держатся как есть (выше 95 °C — не ниже кривой)."
+                "The service drives the fans by CPU and GPU temperature in every mode; in Custom \
+                 the speeds set here are kept as they are (above 95 °C — never below the curve)."
             } else {
-                "EC Legion Pro 7 Gen 10 после ручного задания оборотов не возвращается к своей кривой: \
-                 ни по «авто», ни по смене режима, ни после сна и перезагрузки — только после сброса EC \
-                 (выключить, отсоединить питание, подержать кнопку питания 30 с). Если вы задавали \
-                 обороты вручную — включите, и вентиляторы снова будут следовать температуре."
+                "Once a manual speed has been written, the Legion Pro 7 Gen 10 EC never goes back to its own \
+                 curve: not on auto, not on a mode switch, not after sleep or a reboot — only after an EC reset \
+                 (shut down, unplug the charger, hold the power button for 30 s). If you have set speeds by \
+                 hand, turn this on and the fans will follow temperature again."
             };
+            let c_max = ctx.clone();
             col = col.child(setting_row(
-                "Программное авто (по температуре)",
+                "Maximum fan speed",
+                if saved.fan_max {
+                    "All fans run at their maximum rated speed. Turn off to go back to the software fan curve."
+                } else {
+                    "Bypass the fan curves and run every fan at its maximum rated speed, in any power mode. \
+                     Turns on software auto as well, so the fans can return to the curve afterwards."
+                },
+                Box::new(
+                    Toggle::new()
+                        .on(saved.fan_max)
+                        .on_change(move |v| c_max.send(Job::SetFlag(Flag::FanMax, v)))
+                        .class(if list.iter().any(|f| f.writable) { "" } else { "toggle-off" }),
+                ),
+            ));
+            col = col.child(setting_row(
+                "Software auto (by temperature)",
                 desc,
                 Box::new(Toggle::new().on(saved.fan_curve).on_change(move |v| c.send(Job::SetFlag(Flag::FanCurve, v)))),
             ));
@@ -281,7 +314,7 @@ fn fans(ctx: AppCtx) -> impl Widget {
                     m.insert(idx, v);
                     c.fan_edit.set(m);
                 };
-                let target_text = if auto { "авто".to_string() } else { format!("{target} об/мин") };
+                let target_text = if auto { "auto".to_string() } else { format!("{target} rpm") };
                 col = col.child(
                     Column::new()
                         .gap(10.0)
@@ -297,16 +330,16 @@ fn fans(ctx: AppCtx) -> impl Widget {
                                         .child(Text::new(format!("{} · №{}", f.label, f.index)).class("row-title"))
                                         .child(
                                             Text::new(format!(
-                                                "Сейчас {} об/мин · цель: {}{}",
+                                                "Now {} rpm · target: {}{}",
                                                 f.rpm,
                                                 target_text,
-                                                if changed { " (не применено)" } else { "" }
+                                                if changed { " (not applied)" } else { "" }
                                             ))
                                             .class(if changed { "row-desc changed" } else { "row-desc" }),
                                         )
                                         .class("grow"),
                                 )
-                                .child(Text::new("Авто").class("field-label"))
+                                .child(Text::new("Auto").class("field-label"))
                                 .child(
                                     Toggle::new()
                                         .on(auto)
@@ -332,9 +365,9 @@ fn fans(ctx: AppCtx) -> impl Widget {
                         )
                         .child(
                             Row::new()
-                                .child(Text::new(format!("{} об/мин", f.min)).class("scale-label"))
+                                .child(Text::new(format!("{} rpm", f.min)).class("scale-label"))
                                 .child(DecoratedBox::new().class("grow"))
-                                .child(Text::new(format!("{} об/мин", f.max)).class("scale-label")),
+                                .child(Text::new(format!("{} rpm", f.max)).class("scale-label")),
                         ),
                 );
             }
@@ -347,7 +380,7 @@ fn fans(ctx: AppCtx) -> impl Widget {
 fn autoapply(ctx: AppCtx) -> impl Widget {
     card_with(
         icons::RESTART,
-        "Служба",
+        "Service",
         || Text::new("").class("card-hint"),
         reactive_box(move || {
             let (svc, saved) = ctx.sink.autoapply.get();
@@ -357,19 +390,20 @@ fn autoapply(ctx: AppCtx) -> impl Widget {
 
             let c = ctx.clone();
             let desc = if !svc.installed {
-                "Служба ставится вместе с пакетом. При сборке из исходников скопируйте \
-                 packaging/linux-legion-autoapply.service в ~/.config/systemd/user/."
+                "The service is installed together with the package. When building from source, copy \
+                 packaging/linux-legion-autoapply.service into ~/.config/systemd/user/."
             } else if svc.enabled && svc.active {
-                "Служба работает: восстанавливает значения «Своего» при входе, при переключении в «Свой» \
-                 и после сна, держит лимиты CPU и EPP по режиму, ведёт вентиляторы по температуре."
+                "The service is running: it restores the Custom values at login, whenever Custom is switched \
+                 on and after resume, keeps the CPU limits and EPP in line with the mode, and drives the fans \
+                 by temperature."
             } else if svc.enabled {
-                "Служба включена, но сейчас не запущена — проверьте journalctl --user -u linux-legion-autoapply."
+                "The service is enabled but is not running right now — check journalctl --user -u linux-legion-autoapply."
             } else {
-                "Прошивка забывает лимиты и обороты после перезагрузки, а лимиты CPU в RAPL вообще никто, \
-                 кроме службы, не выставляет. Служба делает это сама (linux-legion --daemon)."
+                "The firmware forgets the limits and fan speeds after a reboot, and nothing but the service \
+                 ever writes the CPU limits into RAPL. The service does it by itself (linux-legion --daemon)."
             };
             col = col.child(setting_row(
-                "Служба linux-legion",
+                "linux-legion service",
                 desc,
                 Box::new(
                     Toggle::new()
@@ -389,14 +423,14 @@ fn autoapply(ctx: AppCtx) -> impl Widget {
                 })
                 .collect();
             items.extend(saved.fans.iter().map(|(i, rpm)| {
-                let label = fans.iter().find(|f| f.index == *i).map_or("Вентилятор", |f| f.label);
-                let v = if *rpm == 0 { "авто".to_string() } else { format!("{rpm} об/мин") };
-                format!("Вентилятор «{label}»: {v}")
+                let label = fans.iter().find(|f| f.index == *i).map_or("Fan", |f| f.label);
+                let v = if *rpm == 0 { "auto".to_string() } else { format!("{rpm} rpm") };
+                format!("Fan “{label}”: {v}")
             }));
             if items.is_empty() {
                 col = col.child(
                     Text::new(
-                        "Пока ничего не сохранено: значения запоминаются кнопками «Применить» в режиме «Свой».",
+                        "Nothing has been saved yet: values are remembered by the Apply buttons in Custom mode.",
                     )
                     .class("muted"),
                 );
@@ -406,7 +440,7 @@ fn autoapply(ctx: AppCtx) -> impl Widget {
                     let (k, v) = it.rsplit_once(": ").unwrap_or((it.as_str(), ""));
                     list = list.child(crate::ui::widgets::kv(k, v.to_string()));
                 }
-                col = col.child(Text::new("Сохранённые значения").class("field-label")).child(list);
+                col = col.child(Text::new("Saved values").class("field-label")).child(list);
             }
             Box::new(col)
         }),
@@ -417,31 +451,53 @@ fn autoapply(ctx: AppCtx) -> impl Widget {
 fn cpu(ctx: AppCtx) -> impl Widget {
     card_with(
         icons::MEMORY,
-        "Процессор по режимам",
+        "CPU",
         || Text::new("").class("card-hint"),
         reactive_box(move || {
             let st = ctx.sink.cpu.get();
             let (_, saved) = ctx.sink.autoapply.get();
             let power = ctx.sink.power.get();
-            if !st.rapl.present() && st.epp.current.is_none() {
-                return Box::new(Text::new("RAPL (powercap) и EPP (cpufreq) недоступны.").class("muted"));
+            if !st.rapl.present() && st.epp.current.is_none() && st.boost.is_none() {
+                return Box::new(Text::new("RAPL (powercap) and EPP (cpufreq) are unavailable.").class("muted"));
             }
             let mut col = Column::new().gap(16.0).cross_axis_alignment(CrossAxisAlignment::Stretch);
+            if let Some(b) = st.boost {
+                let c = ctx.clone();
+                let desc = if !b.writable {
+                    "No permission to change it — update the package's udev rule (wheel or sudo group)."
+                } else if b.on {
+                    "The CPU may run above its base clock (Turbo Boost) in every power mode, up to the \
+                     power limits below. The service keeps this choice after a reboot."
+                } else {
+                    "Off: the CPU stays at its base clock in every mode — cooler and quieter, but much \
+                     slower under load. The service keeps this choice after a reboot."
+                };
+                col = col.child(setting_row(
+                    "CPU Boost",
+                    desc,
+                    Box::new(
+                        Toggle::new()
+                            .on(b.on)
+                            .on_change(move |v| c.send(Job::SetCpuBoost(v)))
+                            .class(if b.writable { "" } else { "toggle-off" }),
+                    ),
+                ));
+            }
             let fmt = |l: Option<crate::hw::rapl::Limits>| match l {
-                Some(l) => format!("{} / {} Вт", l.pl1, l.pl2),
+                Some(l) => format!("{} / {} W", l.pl1, l.pl2),
                 None => "—".to_string(),
             };
             if st.rapl.present() {
                 let c = ctx.clone();
                 let desc = if !st.rapl.writable {
-                    "Нет прав на запись в powercap — обновите udev-правило пакета (группа wheel)."
+                    "No permission to write to powercap — update the package's udev rule (wheel or sudo group)."
                 } else {
-                    "BIOS при загрузке ставит в RAPL MMIO 30/30 Вт и больше их не меняет: без этого \
-                     процессор во всех режимах упирается в 30 Вт. Служба держит в RAPL (MSR и MMIO) \
-                     заводские лимиты режима, а в «Свой» — лимиты, заданные выше."
+                    "The BIOS writes 30/30 W into RAPL MMIO at boot and never touches it again: without this \
+                     the CPU is stuck at 30 W in every mode. The service keeps the mode's factory limits in \
+                     RAPL (MSR and MMIO), and in Custom the limits set above."
                 };
                 col = col.child(setting_row(
-                    "Лимиты CPU по режиму (RAPL)",
+                    "CPU limits per mode (RAPL)",
                     desc,
                     Box::new(
                         Toggle::new()
@@ -457,22 +513,22 @@ fn cpu(ctx: AppCtx) -> impl Widget {
                     let mark = if power.mode == Some(m) { " ●" } else { "" };
                     list = list.child(kv(&format!("{}{mark}", m.label()), fmt(v)));
                 }
-                list = list.child(kv("Сейчас в RAPL: MSR", fmt(st.rapl.msr)));
-                list = list.child(kv("Сейчас в RAPL: MMIO", fmt(st.rapl.mmio)));
-                col = col.child(Text::new("PL1 / PL2 по режимам (свои — rapl.<режим>=PL1/PL2 в custom.conf)").class("field-label")).child(list);
+                list = list.child(kv("Now in RAPL: MSR", fmt(st.rapl.msr)));
+                list = list.child(kv("Now in RAPL: MMIO", fmt(st.rapl.mmio)));
+                col = col.child(Text::new("PL1 / PL2 per mode (your own: rapl.<mode>=PL1/PL2 in custom.conf)").class("field-label")).child(list);
             }
             if let Some(cur) = st.epp.current.clone() {
                 let c = ctx.clone();
                 let desc = if !st.epp.writable {
-                    "Нет прав на запись EPP — обновите udev-правило пакета (группа wheel)."
+                    "No permission to write EPP — update the package's udev rule (wheel or sudo group)."
                 } else {
-                    "performance в Производительность/Экстрим/Свой, balance_performance в Балансе, \
-                     balance_power в Тихом. Перекрывает tuned и power-profiles-daemon. Без performance \
-                     процессор не добирает верхние ступени turbo."
+                    "performance in Performance/Extreme/Custom, balance_performance in Balanced, \
+                     balance_power in Quiet. Overrides tuned and power-profiles-daemon. Without performance \
+                     the CPU does not reach the top turbo steps."
                 };
                 let want = power.mode.map(|m| m.epp()).unwrap_or("—");
                 col = col.child(setting_row(
-                    "EPP по режиму",
+                    "EPP per mode",
                     desc,
                     Box::new(
                         Toggle::new()
@@ -482,13 +538,101 @@ fn cpu(ctx: AppCtx) -> impl Widget {
                     ),
                 ));
                 let now = if st.epp.pinned() {
-                    format!("{cur} — governor performance, EPP прибит к performance")
+                    format!("{cur} — governor performance, EPP pinned to performance")
                 } else {
-                    format!("{cur} (для режима: {want})")
+                    format!("{cur} (for the mode: {want})")
                 };
-                col = col.child(kv("EPP сейчас", now));
+                col = col.child(kv("EPP now", now));
             }
             Box::new(col)
         }),
     )
+}
+
+/// Пресеты «Своего» — как Custom Mode presets в Legion Toolkit.
+fn presets(ctx: AppCtx) -> impl Widget {
+    let c_dialog = ctx.clone();
+    Column::new()
+        .gap(0.0)
+        .cross_axis_alignment(CrossAxisAlignment::Stretch)
+        .child(card_with(
+            icons::BOOKMARK,
+            "Custom Mode presets",
+            || Text::new("").class("card-hint"),
+            reactive_box(move || {
+                let all = ctx.sink.presets.get();
+                let custom = ctx.power_mode() == Some(PowerMode::Custom);
+                let mut col = Column::new().gap(14.0).cross_axis_alignment(CrossAxisAlignment::Stretch);
+                col = col.child(
+                    Text::new(
+                        "Save the current power limits and fan speeds under a name and switch between them. The \
+                         active preset becomes the Custom values the service restores; it is applied at once in Custom.",
+                    )
+                    .class("row-desc"),
+                );
+                if all.list.is_empty() {
+                    col = col.child(Text::new("No presets yet.").class("muted"));
+                } else {
+                    let mut row = Row::new().gap(8.0).cross_axis_alignment(CrossAxisAlignment::Center);
+                    for p in &all.list {
+                        let c = ctx.clone();
+                        let name = p.name.clone();
+                        let on = all.active.as_deref() == Some(p.name.as_str());
+                        row = row.child(
+                            Button::new(p.name.clone())
+                                .icon(if on { icons::CHECK } else { icons::BOOKMARK })
+                                .on_click(move || c.send(Job::ActivatePreset(name.clone())))
+                                .class(if on { "profile-btn profile-btn-on" } else { "profile-btn" }),
+                        );
+                    }
+                    if all.active.is_some() {
+                        let c = ctx.clone();
+                        row = row.child(DecoratedBox::new().class("grow")).child(
+                            Button::new("Delete")
+                                .icon(icons::DELETE)
+                                .on_click(move || c.preset_delete_open.set(true))
+                                .class("btn-ghost"),
+                        );
+                    }
+                    col = col.child(row);
+                }
+                let (c_name, c_save, c_submit) = (ctx.clone(), ctx.clone(), ctx.clone());
+                col = col.child(
+                    Row::new()
+                        .gap(8.0)
+                        .cross_axis_alignment(CrossAxisAlignment::Center)
+                        .child(
+                            TextField::new()
+                                .text(ctx.preset_name.get_untracked())
+                                .placeholder("Preset name")
+                                .width(260.0)
+                                .on_change(move |t| c_name.preset_name.set(t.to_string()))
+                                .on_submit(move |t| {
+                                    if custom {
+                                        c_submit.send(Job::SavePreset(t.to_string()))
+                                    }
+                                }),
+                        )
+                        .child(
+                            Button::new("Save current values")
+                                .icon(icons::SAVE)
+                                .disabled(!custom)
+                                .on_click(move || c_save.send(Job::SavePreset(c_save.preset_name.get_untracked())))
+                                .class("btn-ghost"),
+                        ),
+                );
+                if !custom {
+                    col = col.child(Text::new("Presets are saved from Custom mode.").class("scale-label"));
+                }
+                Box::new(col)
+            }),
+        ))
+        .child({
+            let c = c_dialog.clone();
+            ConfirmDialog::new("Delete preset", "The active preset will be deleted.", c_dialog.preset_delete_open, move |yes| {
+                if let Some(name) = c.sink.presets.get_untracked().active.filter(|_| yes) {
+                    c.send(Job::DeletePreset(name));
+                }
+            })
+        })
 }

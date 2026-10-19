@@ -10,5 +10,19 @@ Exec=linux-legion
 Icon=linux-legion
 Terminal=false
 Categories=Settings;HardwareSettings;
-Keywords=legion;lenovo;vantage;rgb;fan;power;battery;подсветка;вентилятор;батарея;
+Keywords=legion;lenovo;vantage;rgb;fan;power;battery;
+Keywords[ru]=legion;lenovo;vantage;rgb;подсветка;вентилятор;питание;батарея;
 StartupWMClass=linux-legion
+Actions=quiet;balance;performance;
+
+[Desktop Action quiet]
+Name=Quiet mode
+Exec=linux-legion set power-mode quiet
+
+[Desktop Action balance]
+Name=Balance mode
+Exec=linux-legion set power-mode balanced
+
+[Desktop Action performance]
+Name=Performance mode
+Exec=linux-legion set power-mode performance

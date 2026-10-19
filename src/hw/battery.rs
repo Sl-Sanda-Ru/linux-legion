@@ -34,17 +34,17 @@ impl ChargeType {
 
     pub fn label(self) -> &'static str {
         match self {
-            ChargeType::Fast => "Быстрая зарядка",
-            ChargeType::Standard => "Обычная",
-            ChargeType::LongLife => "Сбережение",
+            ChargeType::Fast => "Rapid Charge",
+            ChargeType::Standard => "Normal",
+            ChargeType::LongLife => "Conservation",
         }
     }
 
     pub fn hint(self) -> &'static str {
         match self {
-            ChargeType::Fast => "Заряжает быстрее, но сильнее нагревает аккумулятор.",
-            ChargeType::Standard => "Штатная зарядка до 100 %.",
-            ChargeType::LongLife => "Заряд держится около 80 % — продлевает жизнь аккумулятора, если ноутбук всегда в сети.",
+            ChargeType::Fast => "Charges faster, but heats the battery more.",
+            ChargeType::Standard => "Charge normally, all the way to 100 %.",
+            ChargeType::LongLife => "Stop charging at about 80 % to extend battery life when the laptop is always plugged in.",
         }
     }
 }
@@ -61,10 +61,10 @@ pub enum Status {
 impl Status {
     pub fn label(self) -> &'static str {
         match self {
-            Status::Charging => "Заряжается",
-            Status::Discharging => "Разряжается",
-            Status::Full => "Заряжена",
-            Status::NotCharging => "Не заряжается",
+            Status::Charging => "Charging",
+            Status::Discharging => "Discharging",
+            Status::Full => "Charged",
+            Status::NotCharging => "Not charging",
             Status::Unknown => "—",
         }
     }
@@ -186,5 +186,9 @@ mod tests {
         assert_eq!(cur, Some(ChargeType::Fast));
         assert_eq!(all, vec![ChargeType::Fast, ChargeType::Standard, ChargeType::LongLife]);
         assert_eq!(parse_charge_types("Standard [Long_Life] Custom").0, Some(ChargeType::LongLife));
+        // То, что пишется в sysfs, должно читаться обратно (подпись — отдельно).
+        for t in ChargeType::ALL {
+            assert_eq!(ChargeType::from_sysfs(t.sysfs()), Some(t));
+        }
     }
 }

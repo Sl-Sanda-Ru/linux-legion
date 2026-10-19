@@ -150,19 +150,19 @@ impl EffectType {
     pub fn label(self) -> &'static str {
         use EffectType::*;
         match self {
-            Always => "Статичный цвет",
-            RainbowWave => "Радужная волна",
-            RainbowScrew => "Радужная спираль",
-            ColorWave => "Цветная волна",
-            ColorChange => "Смена цветов",
-            ColorPulse => "Пульсация",
-            Smooth => "Плавный переход",
-            Rain => "Дождь",
-            Ripple => "Рябь от нажатий",
-            Type => "Подсветка нажатий",
-            AudioBounce => "Эквалайзер",
-            AudioRipple => "Звуковая рябь",
-            AuroraSync => "Синхронизация с экраном",
+            Always => "Always",
+            RainbowWave => "Rainbow Wave",
+            RainbowScrew => "Rainbow Screw",
+            ColorWave => "Color Wave",
+            ColorChange => "Color Change",
+            ColorPulse => "Color Pulse",
+            Smooth => "Smooth",
+            Rain => "Rain",
+            Ripple => "Ripple",
+            Type => "Type",
+            AudioBounce => "Audio Bounce",
+            AudioRipple => "Audio Ripple",
+            AuroraSync => "Aurora Sync",
         }
     }
 
@@ -228,10 +228,10 @@ impl Direction {
 
     pub fn label(self) -> &'static str {
         match self {
-            Direction::LeftToRight => "Вправо",
-            Direction::RightToLeft => "Влево",
-            Direction::BottomToTop => "Вверх",
-            Direction::TopToBottom => "Вниз",
+            Direction::LeftToRight => "Left to Right",
+            Direction::RightToLeft => "Right to Left",
+            Direction::BottomToTop => "Bottom to Top",
+            Direction::TopToBottom => "Top to Bottom",
             Direction::None => "—",
         }
     }
@@ -288,7 +288,9 @@ impl Effect {
     pub fn normalize(&mut self) {
         let k = self.kind;
         if k.has_speed() {
-            self.speed = self.speed.clamp(1, 3);
+            // Новый слой получает среднюю скорость, как в Legion Toolkit;
+            // прочитанная из контроллера сохраняется как есть.
+            self.speed = if self.speed == 0 { 2 } else { self.speed.clamp(1, 3) };
         } else {
             self.speed = 0;
         }
@@ -349,9 +351,9 @@ impl fmt::Display for EncodeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             EncodeError::TooLarge(n) => {
-                write!(f, "описание профиля занимает {n} байт из {REPORT_LEN} — уменьшите число слоёв")
+                write!(f, "the profile description takes {n} bytes of {REPORT_LEN} — reduce the number of layers")
             }
-            EncodeError::TooManyItems => write!(f, "в слое больше 255 зон или цветов"),
+            EncodeError::TooManyItems => write!(f, "the layer has more than 255 zones or colors"),
         }
     }
 }
@@ -581,7 +583,7 @@ mod tests {
         let pkt = encode_effects(3, &effects).unwrap();
         assert_eq!(&pkt[..7], &[0x07, 0xCB, 0xC0, 0x03, 3, 1, 1]);
         // Заголовок слоя как у Vantage.
-        assert_eq!(&pkt[7..21], &[1, 6, 1, 2, 2, 1, 3, 0, 4, 4, 5, 0, 6, 0]);
+        assert_eq!(&pkt[7..21], &[1, 6, 1, 2, 2, 2, 3, 0, 4, 4, 5, 0, 6, 0]);
         let mut resp = pkt;
         resp[1] = op::GET_EFFECTS;
         let (profile, back) = decode_effects(&resp).unwrap();
@@ -675,6 +677,6 @@ mod tests {
         e.normalize();
         assert!(e.colors.is_empty());
         assert_eq!(e.rotation, Rotation::Clockwise);
-        assert_eq!(e.speed, 1);
+        assert_eq!(e.speed, 2);
     }
 }

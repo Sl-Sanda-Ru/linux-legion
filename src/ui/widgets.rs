@@ -109,11 +109,12 @@ pub fn access_banner() -> impl Widget {
                 .child(
                     Column::new()
                         .gap(6.0)
-                        .child(Text::new("Нет прав на изменение настроек").class("row-title"))
+                        .child(Text::new("No permission to change settings").class("row-title"))
                         .child(
                             Text::new(
-                                "Установите udev-правило из пакета — оно даёт группе wheel доступ к режимам \
-                                 питания, вентиляторам и подсветке:",
+                                "Install the udev rule from the package — it gives administrators (the wheel group, \
+                                 or sudo where there is no wheel) access to power modes, fans and lighting, \
+                                 and you need to be in that group:",
                             )
                             .class("row-desc"),
                         )

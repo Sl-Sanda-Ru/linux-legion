@@ -63,6 +63,7 @@ pub fn install() -> PathBuf {
             "default performance balance_performance balance_power power",
         );
     }
+    put(&root, "/sys/devices/system/cpu/intel_pstate/no_turbo", "0");
     let ct = "/sys/class/hwmon/hwmon7";
     put(&root, &format!("{ct}/name"), "coretemp");
     put(&root, &format!("{ct}/temp1_label"), "Package id 0");
@@ -136,5 +137,5 @@ fn spawn_drift(root: PathBuf) {
                 }
             }
         })
-        .expect("не удалось запустить поток симулятора");
+        .expect("failed to start the simulator thread");
 }

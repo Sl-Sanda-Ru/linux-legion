@@ -20,6 +20,10 @@
 //! tunable.ppt_pl1_spl=95
 //! fan.1=3000          # 0 — авто
 //! fan.curve=1         # программное авто
+//! fan.max=0           # максимальные обороты (поверх всего)
+//! cpu.boost=1         # турбо-частоты CPU (нет строки — не трогать)
+//! notify.camera=0     # не показывать уведомление о камере
+//! tray=1              # значок в трее
 //! cpu.rapl=1          # лимиты CPU по режиму
 //! cpu.epp=0           # EPP по режиму
 //! rapl.performance=150/190   # свои PL1/PL2 для режима
@@ -30,8 +34,9 @@ use crate::hw::fans::{self, Fan};
 use crate::hw::power::{self, PowerMode};
 use crate::hw::rapl::{self, Limits};
 use crate::hw::sensors::{Gpu, Sampler};
-use std::collections::BTreeMap;
-use std::path::PathBuf;
+use crate::notify;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -55,8 +60,24 @@ fn dir() -> PathBuf {
     })
 }
 
+/// Каталог настроек (`~/.config/linux-legion`).
+pub fn config_dir() -> PathBuf {
+    dir()
+}
+
 fn path() -> PathBuf {
     dir().join("custom.conf")
+}
+
+/// Записать файл настроек целиком (через временный файл, чтобы служба не
+/// прочитала его наполовину).
+pub fn write_config(path: &Path, text: &str) -> std::io::Result<()> {
+    if let Some(d) = path.parent() {
+        std::fs::create_dir_all(d)?;
+    }
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, text)?;
+    std::fs::rename(tmp, path)
 }
 
 /// Переключатели службы.
@@ -68,6 +89,10 @@ pub enum Flag {
     Rapl,
     /// EPP по режиму.
     Epp,
+    /// Максимальные обороты всех вентиляторов.
+    FanMax,
+    /// Значок в трее.
+    Tray,
 }
 
 impl Flag {
@@ -76,6 +101,8 @@ impl Flag {
             Flag::FanCurve => "fan.curve",
             Flag::Rapl => "cpu.rapl",
             Flag::Epp => "cpu.epp",
+            Flag::FanMax => "fan.max",
+            Flag::Tray => "tray",
         }
     }
 }
@@ -91,6 +118,12 @@ pub struct Saved {
     pub epp: bool,
     /// Свои PL1/PL2 для режимов (поверх `PowerMode::cpu_limits`).
     pub rapl_modes: BTreeMap<String, Limits>,
+    pub fan_max: bool,
+    /// Турбо-частоты CPU; `None` — служба их не трогает.
+    pub cpu_boost: Option<bool>,
+    pub tray: bool,
+    /// Отключённые уведомления (по умолчанию включены все).
+    pub notify_off: BTreeSet<notify::Kind>,
 }
 
 impl Default for Saved {
@@ -102,6 +135,10 @@ impl Default for Saved {
             rapl: true,
             epp: false,
             rapl_modes: BTreeMap::new(),
+            fan_max: false,
+            cpu_boost: None,
+            tray: true,
+            notify_off: BTreeSet::new(),
         }
     }
 }
@@ -127,6 +164,20 @@ impl Saved {
                 flag(&mut s.rapl);
             } else if k == Flag::Epp.key() {
                 flag(&mut s.epp);
+            } else if k == Flag::FanMax.key() {
+                flag(&mut s.fan_max);
+            } else if k == Flag::Tray.key() {
+                flag(&mut s.tray);
+            } else if k == "cpu.boost" {
+                if let Ok(n) = v.parse::<u8>() {
+                    s.cpu_boost = Some(n != 0);
+                }
+            } else if let Some(kind) = notify::Kind::ALL.into_iter().find(|n| n.key() == k) {
+                let mut on = true;
+                flag(&mut on);
+                if !on {
+                    s.notify_off.insert(kind);
+                }
             } else if let Some(i) = k.strip_prefix("fan.") {
                 if let (Ok(i), Ok(v)) = (i.parse(), v.parse()) {
                     s.fans.insert(i, v);
@@ -145,7 +196,7 @@ impl Saved {
     }
 
     fn render(&self) -> String {
-        let mut out = String::from("# linux-legion: настройки службы и режима «Свой»\n");
+        let mut out = String::from("# linux-legion: service settings and Custom-mode values\n");
         for (k, v) in &self.tunables {
             out.push_str(&format!("tunable.{k}={v}\n"));
         }
@@ -155,10 +206,22 @@ impl Saved {
         out.push_str(&format!("{}={}\n", Flag::FanCurve.key(), self.fan_curve as u8));
         out.push_str(&format!("{}={}\n", Flag::Rapl.key(), self.rapl as u8));
         out.push_str(&format!("{}={}\n", Flag::Epp.key(), self.epp as u8));
+        out.push_str(&format!("{}={}\n", Flag::FanMax.key(), self.fan_max as u8));
+        out.push_str(&format!("{}={}\n", Flag::Tray.key(), self.tray as u8));
+        if let Some(b) = self.cpu_boost {
+            out.push_str(&format!("cpu.boost={}\n", b as u8));
+        }
+        for k in &self.notify_off {
+            out.push_str(&format!("{}=0\n", k.key()));
+        }
         for (m, l) in &self.rapl_modes {
             out.push_str(&format!("rapl.{m}={}/{}\n", l.pl1, l.pl2));
         }
         out
+    }
+
+    pub fn notifies(&self, kind: notify::Kind) -> bool {
+        !self.notify_off.contains(&kind)
     }
 
     /// Лимиты CPU для режима: свои из конфига, иначе заводские Lenovo;
@@ -184,10 +247,7 @@ pub fn load() -> Saved {
 }
 
 fn store(s: &Saved) -> std::io::Result<()> {
-    std::fs::create_dir_all(dir())?;
-    let tmp = path().with_extension("tmp");
-    std::fs::write(&tmp, s.render())?;
-    std::fs::rename(tmp, path())
+    write_config(&path(), &s.render())
 }
 
 /// Запомнить значение, которое пользователь применил в режиме «Свой».
@@ -209,8 +269,34 @@ pub fn remember_flag(flag: Flag, on: bool) {
         Flag::FanCurve => s.fan_curve = on,
         Flag::Rapl => s.rapl = on,
         Flag::Epp => s.epp = on,
+        Flag::FanMax => s.fan_max = on,
+        Flag::Tray => s.tray = on,
     }
     let _ = store(&s);
+}
+
+pub fn remember_cpu_boost(on: bool) {
+    let mut s = load();
+    s.cpu_boost = Some(on);
+    let _ = store(&s);
+}
+
+pub fn remember_notify(kind: notify::Kind, on: bool) {
+    let mut s = load();
+    if on {
+        s.notify_off.remove(&kind);
+    } else {
+        s.notify_off.insert(kind);
+    }
+    let _ = store(&s);
+}
+
+/// Заменить сохранённые значения «Своего» целиком (включение пресета).
+pub fn replace_custom(tunables: BTreeMap<String, i64>, fans: BTreeMap<u8, u32>) -> std::io::Result<()> {
+    let mut s = load();
+    s.tunables = tunables;
+    s.fans = fans;
+    store(&s)
 }
 
 /// Применить сохранённое для режима «Свой» (лимиты прошивки и обороты).
@@ -233,7 +319,7 @@ pub fn apply_custom() -> Result<Vec<String>, String> {
             Err(e) => errors.push(e.to_string()),
         }
     }
-    if !saved.fan_curve {
+    if !saved.fan_curve && !saved.fan_max {
         let present: Vec<u8> = fans::read_fans().into_iter().map(|f| f.index).collect();
         for (i, rpm) in saved.fans.iter().filter(|(i, _)| present.contains(i)) {
             match fans::set_target(*i, *rpm) {
@@ -260,7 +346,15 @@ pub fn apply_cpu(mode: PowerMode) -> Result<Vec<String>, String> {
                 Ok(d) => done.extend(d),
                 Err(e) => errors.push(e.to_string()),
             },
-            None => errors.push("лимиты «Свой»: атрибуты прошивки не найдены".into()),
+            None => errors.push("Custom limits: firmware attributes not found".into()),
+        }
+    }
+    // Турбо после перезагрузки снова включено — вернуть выбранное.
+    if let Some(on) = saved.cpu_boost {
+        match cpufreq::set_boost(on) {
+            Ok(true) => done.push(format!("boost={}", if on { "on" } else { "off" })),
+            Ok(false) => {}
+            Err(e) => errors.push(e.to_string()),
         }
     }
     if saved.epp && cpufreq::read().current.is_some() {
@@ -293,7 +387,16 @@ pub fn release_fans() -> Vec<String> {
     fans::read_fans()
         .iter()
         .filter(|f| f.writable)
-        .filter_map(|f| fans::set_target(f.index, 0).ok().map(|_| format!("fan{}=авто", f.index)))
+        .filter_map(|f| fans::set_target(f.index, 0).ok().map(|_| format!("fan{}=auto", f.index)))
+        .collect()
+}
+
+/// Максимальные обороты на всех вентиляторах (пишет только отличия).
+pub fn apply_fan_max() -> Vec<String> {
+    fans::read_fans()
+        .iter()
+        .filter(|f| f.writable && f.max > 0 && f.target != f.max)
+        .filter_map(|f| fans::set_target(f.index, f.max).ok().map(|_| format!("fan{}={}", f.index, f.max)))
         .collect()
 }
 
@@ -405,6 +508,13 @@ impl FanCurve {
     }
 }
 
+/// Один шаг программного авто по текущим температурам — после выключения
+/// максимальных оборотов, когда служба может быть не запущена.
+pub fn apply_curve_once() -> Vec<String> {
+    let saved = load();
+    FanCurve::default().tick(power::read_state().mode, &saved)
+}
+
 /// Сдвиг CLOCK_BOOTTIME относительно CLOCK_MONOTONIC растёт только во сне.
 fn sleep_offset() -> Duration {
     let read = |id| {
@@ -418,25 +528,135 @@ fn sleep_offset() -> Duration {
 const CPU_PERIOD: Duration = Duration::from_secs(5);
 const FAN_PERIOD: Duration = Duration::from_secs(2);
 
+/// Где служба отмечает, с какого момента ноутбук работает от батареи
+/// (`$XDG_RUNTIME_DIR` очищается при перезагрузке — так и надо).
+fn battery_state_path() -> PathBuf {
+    let base = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join(format!("linux-legion-{}", unsafe { libc::getuid() })));
+    base.join("linux-legion").join("on-battery-since")
+}
+
+fn record_battery(on_battery: bool) {
+    let p = battery_state_path();
+    if on_battery {
+        if !p.exists() {
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+            let _ = write_config(&p, &now.to_string());
+        }
+    } else {
+        let _ = std::fs::remove_file(p);
+    }
+}
+
+/// С какого момента ноутбук работает от батареи (по отметке службы).
+pub fn on_battery_since() -> Option<std::time::SystemTime> {
+    let secs: u64 = std::fs::read_to_string(battery_state_path()).ok()?.trim().parse().ok()?;
+    Some(std::time::UNIX_EPOCH + Duration::from_secs(secs))
+}
+
+/// Уведомления о том, что поменялось на ноутбуке (в том числе клавишами Fn).
+#[derive(Default)]
+struct Watch {
+    mode: Option<PowerMode>,
+    toggles: Vec<(crate::hw::device::Toggle, bool)>,
+    charger: Option<crate::hw::charger::Charger>,
+}
+
+impl Watch {
+    fn tick(&mut self, saved: &Saved, mode: Option<PowerMode>, charger: crate::hw::charger::Charger) {
+        use crate::hw::charger::Charger;
+        use crate::hw::device::{self, Toggle};
+        use notify::Kind;
+        if self.mode.is_some() && mode != self.mode && saved.notifies(Kind::PowerMode) {
+            if let Some(m) = mode {
+                notify::send(Kind::PowerMode, "Power Mode", m.label());
+            }
+        }
+        self.mode = mode;
+
+        let toggles: Vec<(Toggle, bool)> = device::read_toggles().items.into_iter().map(|(t, on, _)| (t, on)).collect();
+        for &(t, on) in &toggles {
+            let was = self.toggles.iter().find(|(x, _)| *x == t).map(|(_, v)| *v);
+            let kind = match t {
+                Toggle::FnLock => Kind::FnLock,
+                Toggle::Camera => Kind::Camera,
+                Toggle::UsbCharging => continue,
+            };
+            if was.is_some_and(|w| w != on) && saved.notifies(kind) {
+                notify::send(kind, &format!("{} {}", t.label(), if on { "on" } else { "off" }), "");
+            }
+        }
+        self.toggles = toggles;
+
+        if let Some(was) = self.charger.filter(|w| *w != charger) {
+            if saved.notifies(Kind::AcAdapter) {
+                match charger {
+                    Charger::None => notify::send(Kind::AcAdapter, "AC adapter disconnected", ""),
+                    c if c.low_wattage() => notify::send(Kind::AcAdapter, "Low wattage charger connected", &c.label()),
+                    _ if !was.connected() => notify::send(Kind::AcAdapter, "AC adapter connected", ""),
+                    _ => {}
+                }
+            }
+        }
+        self.charger = Some(charger);
+    }
+}
+
+/// Выполнить правило в своём потоке: в шагах бывают паузы, а служба в это
+/// время должна вести вентиляторы.
+fn run_rule(rule: &crate::automation::Rule, notify_errors: bool) {
+    let rule = rule.clone();
+    let _ = std::thread::Builder::new().name("legion-action".into()).spawn(move || {
+        let mut ctx = crate::actions::Ctx { kb: None, simulate: false };
+        match crate::actions::run_all(&rule.steps, &mut ctx) {
+            Ok(done) => eprintln!("linux-legion: action “{}”: {}", rule.name, done.join(", ")),
+            Err(e) => {
+                eprintln!("linux-legion: action “{}” failed: {e}", rule.name);
+                if notify_errors {
+                    notify::send(notify::Kind::Automation, &format!("Action “{}” failed", rule.name), &e);
+                }
+            }
+        }
+    });
+}
+
 /// `linux-legion --daemon`: следит за режимом и сном, применяет сохранённое,
-/// держит лимиты CPU и EPP по режиму, ведёт вентиляторы по температуре.
+/// держит лимиты CPU и EPP по режиму, ведёт вентиляторы по температуре,
+/// показывает уведомления и выполняет правила автоматизации.
 pub fn daemon() -> ! {
+    use crate::automation;
     let log = |m: String| eprintln!("linux-legion: {m}");
     let report = |why: &str, r: Result<Vec<String>, String>| match r {
         Ok(done) if !done.is_empty() => log(format!("{why}: {}", done.join(", "))),
         Ok(_) => {}
         Err(e) => log(format!("{why}: {e}")),
     };
-    log("служба запущена".into());
+    log("service started".into());
     // Драйверам после загрузки нужна пара секунд.
     std::thread::sleep(Duration::from_secs(2));
     let mut saved = load();
     let mut conf_mtime = std::fs::metadata(path()).and_then(|m| m.modified()).ok();
     let mut mode = power::read_state().mode;
-    report("старт", apply_custom());
+    report("startup", apply_custom());
     if let Some(m) = mode {
-        report("старт", apply_cpu(m));
+        report("startup", apply_cpu(m));
     }
+    let (mut rules, warnings) = automation::load_with_warnings();
+    for w in warnings {
+        log(format!("automation.conf: {w}"));
+    }
+    let mut rules_mtime = automation::mtime();
+    let mut snap = automation::snapshot(&rules);
+    for r in automation::fired(&rules, &snap, &snap, true, false) {
+        run_rule(r, saved.notifies(notify::Kind::Automation));
+    }
+    let mut watch = Watch::default();
+    watch.tick(&saved, mode, snap.charger);
+    let mut tray = crate::tray::TrayIcon::default();
+    tray.sync(saved.tray);
+    record_battery(!snap.charger.connected());
+
     let mut curve = FanCurve::default();
     let mut last_sleep = sleep_offset();
     let mut next_cpu = Instant::now() + CPU_PERIOD;
@@ -448,36 +668,50 @@ pub fn daemon() -> ! {
         if mtime != conf_mtime {
             conf_mtime = mtime;
             let fresh = load();
-            if fresh.fan_curve && !saved.fan_curve {
+            if fresh.fan_curve != saved.fan_curve || fresh.fan_max != saved.fan_max || fresh.fans != saved.fans {
+                // Сбросить память кривой: после максимальных оборотов или смены
+                // значений вентиляторы надо переписать сразу, а не через три шага.
                 curve = FanCurve::default();
+                next_fan = Instant::now();
             }
             saved = fresh;
             if let Some(m) = mode {
-                report("настройки", apply_cpu(m));
+                report("settings", apply_cpu(m));
             }
+        }
+        if automation::mtime() != rules_mtime {
+            rules_mtime = automation::mtime();
+            let (fresh, warnings) = automation::load_with_warnings();
+            for w in warnings {
+                log(format!("automation.conf: {w}"));
+            }
+            rules = fresh;
+            // Число правил с программами могло поменяться — снимок заново.
+            snap = automation::snapshot(&rules);
         }
         let now_mode = power::read_state().mode;
         let slept = sleep_offset();
-        if slept > last_sleep + Duration::from_secs(1) {
+        let resumed = slept > last_sleep + Duration::from_secs(1);
+        if resumed {
             // После сна EC сбрасывает обороты не сразу — чуть подождать.
             std::thread::sleep(Duration::from_secs(2));
-            report("после сна", apply_custom());
+            report("after resume", apply_custom());
             if let Some(m) = now_mode {
-                report("после сна", apply_cpu(m));
+                report("after resume", apply_cpu(m));
             }
             curve.last.clear();
         } else if now_mode != mode {
             if now_mode == Some(PowerMode::Custom) {
                 std::thread::sleep(Duration::from_millis(500));
-                report("включён «Свой»", apply_custom());
-            } else if mode == Some(PowerMode::Custom) && !saved.fan_curve {
+                report("Custom switched on", apply_custom());
+            } else if mode == Some(PowerMode::Custom) && !saved.fan_curve && !saved.fan_max {
                 let done = release_fans();
                 if !done.is_empty() {
-                    log(format!("выключен «Свой»: {}", done.join(", ")));
+                    log(format!("Custom switched off: {}", done.join(", ")));
                 }
             }
             if let Some(m) = now_mode {
-                report("режим", apply_cpu(m));
+                report("mode", apply_cpu(m));
             }
             curve.last.clear();
             next_cpu = Instant::now() + CPU_PERIOD;
@@ -485,18 +719,30 @@ pub fn daemon() -> ! {
         mode = now_mode;
         last_sleep = slept;
 
+        let fresh = automation::snapshot(&rules);
+        watch.tick(&saved, mode, fresh.charger);
+        tray.sync(saved.tray);
+        if fresh.charger.connected() != snap.charger.connected() {
+            record_battery(!fresh.charger.connected());
+        }
+        for r in automation::fired(&rules, &snap, &fresh, false, resumed) {
+            log(format!("action “{}”: {}", r.name, r.trigger.describe()));
+            run_rule(r, saved.notifies(notify::Kind::Automation));
+        }
+        snap = fresh;
+
         let now = Instant::now();
         if now >= next_cpu {
             next_cpu = now + CPU_PERIOD;
             if let Some(m) = mode {
-                report("лимиты", apply_cpu(m));
+                report("limits", apply_cpu(m));
             }
         }
-        if saved.fan_curve && now >= next_fan {
+        if (saved.fan_curve || saved.fan_max) && now >= next_fan {
             next_fan = now + FAN_PERIOD;
-            let done = curve.tick(mode, &saved);
+            let done = if saved.fan_max { apply_fan_max() } else { curve.tick(mode, &saved) };
             if !done.is_empty() {
-                log(format!("вентиляторы: {}", done.join(", ")));
+                log(format!("fans: {}", done.join(", ")));
             }
         }
     }
@@ -550,7 +796,10 @@ mod tests {
         s.fan_curve = true;
         s.epp = true;
         s.rapl_modes.insert("performance".into(), Limits { pl1: 150, pl2: 190 });
+        s.cpu_boost = Some(false);
+        s.tray = false;
         let text = s.render();
+        assert!(text.contains("cpu.boost=0"));
         assert!(text.contains("tunable.ppt_pl1_spl=95"));
         assert!(text.contains("rapl.performance=150/190"));
         assert_eq!(Saved::parse(&text), s);

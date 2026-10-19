@@ -54,7 +54,7 @@ fn hero(ctx: AppCtx) -> impl Widget {
                         .child(Text::new(if i.model.is_empty() { "Legion".into() } else { i.model.clone() }).class("hero-title"))
                         .child(
                             Text::new(format!(
-                                "{} · {} · {:.0} ГБ ОЗУ",
+                                "{} · {} · {:.0} GB RAM",
                                 if i.cpu.is_empty() { "CPU" } else { &i.cpu },
                                 if i.gpu.is_empty() { "GPU" } else { &i.gpu },
                                 i.memory_gb.round()
@@ -138,13 +138,35 @@ fn cpu_card(ctx: AppCtx) -> impl Widget {
                 temp_color(temp),
                 132.0,
                 s.cpu_temp.map_or("—".into(), |t| format!("{t:.0}°")),
-                "температура",
+                "temperature",
             )))
-            .child(line("Загрузка", format!("{:.0} %", s.cpu_load)))
+            .child(line("Load", format!("{:.0} %", s.cpu_load)))
             .child(bar(s.cpu_load / 100.0, "accent"))
-            .child(line("Частота", s.cpu_mhz.map_or("—".into(), |m| format!("{:.2} ГГц", m as f32 / 1000.0))));
-        stat_card(icons::MEMORY, "Процессор", Box::new(body))
+            .child(line("Clock", s.cpu_mhz.map_or("—".into(), |m| format!("{:.2} GHz", m as f32 / 1000.0))))
+            .children(vec![boost_row(&ctx)]);
+        stat_card(icons::MEMORY, "CPU", Box::new(body))
     })
+}
+
+/// Переключатель турбо-частот прямо на главной (подробности — на странице
+/// производительности).
+fn boost_row(ctx: &AppCtx) -> Box<dyn Widget> {
+    let Some(b) = ctx.sink.cpu.get().boost else { return crate::ui::widgets::nothing() };
+    let c = ctx.clone();
+    Box::new(
+        Row::new()
+            .gap(8.0)
+            .cross_axis_alignment(CrossAxisAlignment::Center)
+            .child(Text::new("CPU Boost").class("stat-label"))
+            .child(DecoratedBox::new().class("grow"))
+            .child(
+                Toggle::new()
+                    .on(b.on)
+                    .on_change(move |v| c.send(Job::SetCpuBoost(v)))
+                    .class(if b.writable { "" } else { "toggle-off" }),
+            )
+            .class("stat-line"),
+    )
 }
 
 fn gpu_card(ctx: AppCtx) -> impl Widget {
@@ -163,29 +185,30 @@ fn gpu_card(ctx: AppCtx) -> impl Widget {
                             temp_color(temp),
                             132.0,
                             g.temp.map_or("—".into(), |t| format!("{t:.0}°")),
-                            "температура",
+                            "temperature",
                         )))
-                        .child(line("Загрузка", format!("{load:.0} %")))
+                        .child(line("Load", format!("{load:.0} %")))
                         .child(bar(load / 100.0, "accent"))
-                        .child(line("Мощность", g.power_w.map_or("—".into(), |p| format!("{p:.0} Вт")))),
+                        .child(line("Power", g.power_w.map_or("—".into(), |p| format!("{p:.0} W"))))
+                        .children(vec![gpu_apps(&ctx)]),
                 )
             }
             Gpu::Sleeping => Box::new(
                 Column::new()
                     .gap(10.0)
                     .cross_axis_alignment(CrossAxisAlignment::Center)
-                    .child(ring(0.0, Color::TRANSPARENT, 132.0, "zZ".into(), "спит"))
-                    .child(Text::new("Дискретная видеокарта отключена для экономии энергии").class("muted-center")),
+                    .child(ring(0.0, Color::TRANSPARENT, 132.0, "zZ".into(), "asleep"))
+                    .child(Text::new("The discrete GPU is powered down to save energy").class("muted-center")),
             ),
             Gpu::Absent => Box::new(
                 Column::new()
                     .gap(10.0)
                     .cross_axis_alignment(CrossAxisAlignment::Center)
-                    .child(ring(0.0, Color::TRANSPARENT, 132.0, "—".into(), "нет данных"))
-                    .child(Text::new("Данные появятся через пару секунд").class("muted-center")),
+                    .child(ring(0.0, Color::TRANSPARENT, 132.0, "—".into(), "no data"))
+                    .child(Text::new("Data will appear in a couple of seconds").class("muted-center")),
             ),
         };
-        stat_card(icons::GPU, "Видеокарта", body)
+        stat_card(icons::GPU, "GPU", body)
     })
 }
 
@@ -196,17 +219,17 @@ fn mem_card(ctx: AppCtx) -> impl Widget {
         let body = Column::new()
             .gap(10.0)
             .cross_axis_alignment(CrossAxisAlignment::Stretch)
-            .child(Center::new().child(ring(frac, load_color(frac), 132.0, format!("{:.0}%", frac * 100.0), "занято")))
-            .child(line("Используется", format!("{:.1} ГБ", s.mem_used_gb)))
-            .child(line("Всего", format!("{:.1} ГБ", s.mem_total_gb)));
-        stat_card(icons::LAYERS, "Память", Box::new(body))
+            .child(Center::new().child(ring(frac, load_color(frac), 132.0, format!("{:.0}%", frac * 100.0), "used")))
+            .child(line("In use", format!("{:.1} GB", s.mem_used_gb)))
+            .child(line("Total", format!("{:.1} GB", s.mem_total_gb)));
+        stat_card(icons::LAYERS, "Memory", Box::new(body))
     })
 }
 
 fn battery_card(ctx: AppCtx) -> impl Widget {
     reactive_box(move || {
         let Some(b) = ctx.sink.battery.get() else {
-            return Box::new(stat_card(icons::BATTERY_FULL, "Батарея", Box::new(Text::new("Нет батареи").class("muted"))));
+            return Box::new(stat_card(icons::BATTERY_FULL, "Battery", Box::new(Text::new("No battery").class("muted"))));
         };
         let color = match b.percent {
             p if p <= 15 => Color::from_hex("#f43f5e"),
@@ -214,17 +237,17 @@ fn battery_card(ctx: AppCtx) -> impl Widget {
             _ => Color::from_hex("#34d399"),
         };
         let time = match (b.status, b.minutes_left()) {
-            (Status::Discharging, Some(m)) => format!("{} ч {:02} мин", m / 60, m % 60),
-            (Status::Charging, Some(m)) => format!("до полной {} ч {:02} мин", m / 60, m % 60),
+            (Status::Discharging, Some(m)) => format!("{} h {:02} min", m / 60, m % 60),
+            (Status::Charging, Some(m)) => format!("{} h {:02} min to full", m / 60, m % 60),
             _ => "—".into(),
         };
         let body = Column::new()
             .gap(10.0)
             .cross_axis_alignment(CrossAxisAlignment::Stretch)
             .child(Center::new().child(ring(b.percent as f32 / 100.0, color, 132.0, format!("{}%", b.percent), b.status.label())))
-            .child(line("Питание", if b.ac_online { "от сети".into() } else { "от батареи".into() }))
-            .child(line("Осталось", time));
-        Box::new(stat_card(if b.ac_online { icons::BATTERY_CHARGING } else { icons::BATTERY_FULL }, "Батарея", Box::new(body)))
+            .child(line("Power source", if b.ac_online { "AC power".into() } else { "battery".into() }))
+            .child(line("Remaining", time));
+        Box::new(stat_card(if b.ac_online { icons::BATTERY_CHARGING } else { icons::BATTERY_FULL }, "Battery", Box::new(body)))
     })
 }
 
@@ -232,16 +255,16 @@ fn fans_card(ctx: AppCtx) -> impl Widget {
     let c = ctx.clone();
     card_with(
         icons::FAN,
-        "Вентиляторы",
+        "Fans",
         move || {
             let custom = c.power_mode() == Some(PowerMode::Custom);
-            Text::new(if custom { "ручное управление" } else { "автоматически" }).class("card-hint")
+            Text::new(if custom { "manual control" } else { "automatic" }).class("card-hint")
         },
         reactive(move || {
             let fans = ctx.sink.fans.get();
             let mut row = Row::new().gap(24.0).cross_axis_alignment(CrossAxisAlignment::Stretch);
             if fans.is_empty() {
-                return row.child(Text::new("Драйвер lenovo-wmi-other не отдаёт данные о вентиляторах").class("muted"));
+                return row.child(Text::new("The lenovo-wmi-other driver reports no fan data").class("muted"));
             }
             for f in fans {
                 let frac = if f.max > 0 { f.rpm as f32 / f.max as f32 } else { 0.0 };
@@ -254,7 +277,7 @@ fn fans_card(ctx: AppCtx) -> impl Widget {
                                 .gap(8.0)
                                 .child(Text::new(f.label).class("stat-label"))
                                 .child(DecoratedBox::new().class("grow"))
-                                .child(Text::new(format!("{} об/мин", f.rpm)).class("stat-value")),
+                                .child(Text::new(format!("{} rpm", f.rpm)).class("stat-value")),
                         )
                         .child(bar(frac, "fan"))
                         .class("grow"),
@@ -262,5 +285,39 @@ fn fans_card(ctx: AppCtx) -> impl Widget {
             }
             row
         }),
+    )
+}
+
+/// Кто держит дискретную карту включённой — и «Deactivate», как в Legion Toolkit.
+fn gpu_apps(ctx: &AppCtx) -> Box<dyn Widget> {
+    let apps = ctx.sink.gpu_apps.get();
+    if apps.is_empty() {
+        return Box::new(Text::new("No apps are using it").class("stat-label"));
+    }
+    let names: Vec<String> = apps.iter().map(|p| p.name.clone()).collect();
+    let closable: Vec<String> = apps.iter().filter(|p| p.killable).map(|p| p.name.clone()).collect();
+    let (c_open, c_yes) = (ctx.clone(), ctx.clone());
+    let body = if closable.is_empty() {
+        "Only system processes are using the GPU; they are not closed.".to_string()
+    } else {
+        format!("These apps will be asked to close, so the GPU can go to sleep: {}. Unsaved work in them may be lost.", closable.join(", "))
+    };
+    Box::new(
+        Column::new()
+            .gap(6.0)
+            .cross_axis_alignment(CrossAxisAlignment::Stretch)
+            .child(Text::new(format!("Kept awake by {}", names.join(", "))).class("stat-label"))
+            .child(
+                Button::new("Deactivate GPU")
+                    .icon(icons::BOLT)
+                    .disabled(closable.is_empty())
+                    .on_click(move || c_open.gpu_confirm_open.set(true))
+                    .class("btn-ghost"),
+            )
+            .child(ConfirmDialog::new("Deactivate discrete GPU", body, ctx.gpu_confirm_open, move |yes| {
+                if yes {
+                    c_yes.send(Job::DeactivateGpu);
+                }
+            })),
     )
 }

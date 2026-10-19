@@ -35,6 +35,13 @@ pub const SEARCH: &str = "\u{e8b6}";
 pub const LAYERS: &str = "\u{e53b}";
 pub const EDIT: &str = "\u{e3c9}";
 pub const AUTO: &str = "\u{e65f}";
+pub const ACTIONS: &str = "\u{e97a}"; // account_tree
+pub const PLAY: &str = "\u{e037}";
+pub const UPLOAD: &str = "\u{e2c6}";
+pub const DOWNLOAD: &str = "\u{e2c4}";
+pub const NOTIFICATIONS: &str = "\u{e7f4}";
+pub const BOOKMARK: &str = "\u{e866}";
+pub const CLOSE: &str = "\u{e5cd}";
 
 // режимы питания
 pub const MODE_QUIET: &str = "\u{f03d}"; // nightlight

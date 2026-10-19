@@ -2,5 +2,6 @@
 
 pub mod device;
 pub mod layout;
+pub mod profile_file;
 pub mod protocol;
 pub mod sim;

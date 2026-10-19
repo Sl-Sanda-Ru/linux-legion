@@ -1,3 +1,4 @@
+pub mod actions;
 pub mod battery;
 pub mod device;
 pub mod home;

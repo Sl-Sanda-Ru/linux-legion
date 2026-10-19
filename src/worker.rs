@@ -2,18 +2,25 @@
 //! подсветки и выполняет команды UI. Результаты уходят в сигналы
 //! (`set()` потокобезопасен); читать сигналы отсюда нельзя.
 
+use crate::actions;
+use crate::automation::{self, Rule};
 use crate::autoapply::{self, Flag, Saved, ServiceState};
-use crate::hw::battery::{self, Battery, ChargeType};
-use crate::hw::cpufreq::{self, Epp};
+use crate::hw::battery::{self, Battery, ChargeType, Status};
+use crate::hw::charger::{self, Charger};
+use crate::hw::gpu::{self as gpu_apps, GpuProcess};
+use crate::hw::cpufreq::{self, Boost, Epp};
 use crate::hw::device::{self, SystemInfo, Toggle, Toggles};
 use crate::hw::fans::{self, Fan};
 use crate::hw::power::{self, PowerMode, PowerState, Tunable};
 use crate::hw::rapl::{self, Rapl};
 use crate::hw::sensors::{Gpu, Sampler, Sensors};
 use crate::hw::sysfs;
+use crate::notify;
+use crate::presets::{self, Presets};
 use crate::spectrum::device::{Error as KbError, KeyMatrix, Keyboard};
+use crate::spectrum::profile_file;
 use crate::spectrum::protocol::{Effect, Rgb};
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -48,8 +55,33 @@ pub enum Job {
     RgbReset(u8),
     /// Включить/выключить службу автоприменения.
     SetAutoApply(bool),
-    /// Переключатель службы (кривая вентиляторов, RAPL, EPP).
+    /// Переключатель службы (кривая вентиляторов, RAPL, EPP, максимум оборотов).
     SetFlag(Flag, bool),
+    SetNotify(notify::Kind, bool),
+    SetCpuBoost(bool),
+    ActivatePreset(String),
+    SavePreset(String),
+    DeletePreset(String),
+    /// Записать правила автоматизации целиком.
+    SaveRules(Vec<Rule>),
+    /// Выполнить шаги правила (быстрое действие или «Run now»).
+    RunRule(String),
+    /// Профиль подсветки → файл Legion Toolkit и обратно.
+    RgbExport(u8, String),
+    RgbImport(u8, String),
+    /// Завершить программы, которые держат дискретную видеокарту.
+    DeactivateGpu,
+}
+
+/// Источник питания и разряд за время работы от батареи (как на странице
+/// батареи в Legion Toolkit).
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct PowerSource {
+    pub charger: Charger,
+    pub on_battery_since: Option<std::time::SystemTime>,
+    /// Наименьший и наибольший разряд с момента отключения, Вт.
+    pub min_discharge_w: Option<f32>,
+    pub max_discharge_w: Option<f32>,
 }
 
 /// Лимиты CPU (RAPL) и EPP — то, чем управляет служба по режиму.
@@ -57,6 +89,8 @@ pub enum Job {
 pub struct CpuState {
     pub rapl: Rapl,
     pub epp: Epp,
+    /// Турбо-частоты; `None` — драйвер их не показывает.
+    pub boost: Option<Boost>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
@@ -112,6 +146,19 @@ pub struct Sink {
     /// Служба автоприменения и сохранённые значения режима «Свой».
     pub autoapply: RwSignal<(ServiceState, Saved)>,
     pub cpu: RwSignal<CpuState>,
+    pub presets: RwSignal<Presets>,
+    pub rules: RwSignal<Vec<Rule>>,
+    pub power_source: RwSignal<PowerSource>,
+    /// Программы, которые держат видеокарту (опрашиваются на главной).
+    pub gpu_apps: RwSignal<Vec<GpuProcess>>,
+}
+
+/// Номер уведомления — общий для потока и запущенных из него действий.
+static SEQ: AtomicU64 = AtomicU64::new(0);
+
+fn post(sink: &Sink, kind: NoticeKind, text: impl Into<String>) {
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed) + 1;
+    sink.notice.set(Some(Notice { kind, text: text.into(), seq }));
 }
 
 pub fn spawn(sink: Sink, simulate: bool, page: Arc<AtomicU8>, rx: Receiver<Job>) {
@@ -126,12 +173,12 @@ pub fn spawn(sink: Sink, simulate: bool, page: Arc<AtomicU8>, rx: Receiver<Job>)
                 kb: None,
                 matrix: KeyMatrix::default(),
                 last_gpu: Gpu::Absent,
-                seq: 0,
                 last_rgb_try: None,
+                source: PowerSource::default(),
             };
             w.run(rx)
         })
-        .expect("не удалось запустить фоновый поток");
+        .expect("failed to start the background thread");
 }
 
 struct Worker {
@@ -143,8 +190,8 @@ struct Worker {
     /// Матрица зон не меняется, пока контроллер подключён.
     matrix: KeyMatrix,
     last_gpu: Gpu,
-    seq: u64,
     last_rgb_try: Option<Instant>,
+    source: PowerSource,
 }
 
 impl Worker {
@@ -152,6 +199,7 @@ impl Worker {
         self.sink.info.set(device::read_info());
         self.refresh_sysfs();
         self.refresh_autoapply();
+        self.refresh_config();
         let mut next_sysfs = Instant::now();
         let mut next_gpu = Instant::now();
         let mut next_status = Instant::now();
@@ -172,6 +220,11 @@ impl Worker {
                     s.gpu = self.last_gpu.clone();
                 }
                 self.last_gpu = s.gpu.clone();
+                if gpu {
+                    // Кто держит карту — только пока она не спит (иначе и так никто).
+                    let apps = if matches!(s.gpu, Gpu::Active(_)) { gpu_apps::processes() } else { Vec::new() };
+                    self.sink.gpu_apps.set(apps);
+                }
                 self.sink.sensors.set(s);
                 self.refresh_sysfs();
                 next_sysfs = now + SYSFS_POLL;
@@ -199,16 +252,48 @@ impl Worker {
     }
 
     fn notify(&mut self, kind: NoticeKind, text: impl Into<String>) {
-        self.seq += 1;
-        self.sink.notice.set(Some(Notice { kind, text: text.into(), seq: self.seq }));
+        post(&self.sink, kind, text);
+    }
+
+    fn refresh_config(&mut self) {
+        self.sink.presets.set(presets::load());
+        self.sink.rules.set(automation::load());
+    }
+
+    /// Источник питания; разряд копится, пока ноутбук от батареи.
+    fn refresh_source(&mut self, b: Option<&Battery>) {
+        let charger = charger::read();
+        let src = &mut self.source;
+        if charger.connected() {
+            *src = PowerSource { charger, ..Default::default() };
+        } else {
+            if src.charger.connected() {
+                // Только что отключили: разряд считается заново.
+                src.min_discharge_w = None;
+                src.max_discharge_w = None;
+                src.on_battery_since = Some(std::time::SystemTime::now());
+            }
+            if let Some(t) = autoapply::on_battery_since() {
+                // Отметка службы точнее: она видит отключение, даже когда окна нет.
+                src.on_battery_since = Some(t);
+            }
+            src.charger = charger;
+            if let Some(w) = b.filter(|b| b.status == Status::Discharging && b.power_w > 0.5).map(|b| b.power_w) {
+                src.min_discharge_w = Some(src.min_discharge_w.map_or(w, |m| m.min(w)));
+                src.max_discharge_w = Some(src.max_discharge_w.map_or(w, |m| m.max(w)));
+            }
+        }
+        self.sink.power_source.set(self.source.clone());
     }
 
     fn refresh_sysfs(&mut self) {
         self.sink.power.set(power::read_state());
         self.sink.tunables.set(power::read_tunables());
         self.sink.fans.set(fans::read_fans());
-        self.sink.cpu.set(CpuState { rapl: rapl::read(), epp: cpufreq::read() });
-        self.sink.battery.set(battery::read_battery());
+        self.sink.cpu.set(CpuState { rapl: rapl::read(), epp: cpufreq::read(), boost: cpufreq::boost() });
+        let b = battery::read_battery();
+        self.refresh_source(b.as_ref());
+        self.sink.battery.set(b);
         self.sink.toggles.set(device::read_toggles());
     }
 
@@ -221,7 +306,7 @@ impl Worker {
         match r {
             Ok(()) => self.notify(NoticeKind::Success, ok),
             Err(sysfs::Error::Rejected(..)) if power::read_state().mode != Some(PowerMode::Custom) => {
-                self.notify(NoticeKind::Error, "Драйвер принимает это значение только в режиме «Свой»")
+                self.notify(NoticeKind::Error, "The driver accepts this value only in Custom mode")
             }
             Err(e) => self.notify(NoticeKind::Error, e.to_string()),
         }
@@ -231,18 +316,9 @@ impl Worker {
     fn handle(&mut self, job: Job) {
         match job {
             Job::SetPowerMode(m) => {
-                let was = power::read_state().mode;
-                let r = power::set_mode(m);
-                if r.is_ok() {
-                    // EC Legion помнит ручные обороты и вне «Свой» — вернуть
-                    // авто, если вентиляторы не ведёт служба.
-                    if was == Some(PowerMode::Custom) && m != PowerMode::Custom && !autoapply::load().fan_curve {
-                        autoapply::release_fans();
-                    }
-                    // Лимиты CPU/EPP под режим — на случай, если служба не запущена.
-                    let _ = autoapply::apply_cpu(m);
-                }
-                self.sysfs_result(r, format!("Режим питания: {}", m.label()));
+                // Вместе с режимом — вентиляторы EC и лимиты CPU/EPP (см. actions).
+                let r = actions::set_power_mode(m);
+                self.sysfs_result(r, format!("Power mode: {}", m.label()));
             }
             Job::SetTunable(name, v) => {
                 let label = self.label_of(&name);
@@ -259,49 +335,65 @@ impl Worker {
                     autoapply::remember_fan(i, rpm);
                     self.refresh_autoapply();
                 }
-                let text = if rpm == 0 { "авто".to_string() } else { format!("{rpm} об/мин") };
-                self.sysfs_result(r, format!("Вентилятор {i}: {text}"));
+                let text = if rpm == 0 { "auto".to_string() } else { format!("{rpm} rpm") };
+                self.sysfs_result(r, format!("Fan {i}: {text}"));
             }
             Job::SetChargeType(t) => {
                 let r = battery::set_charge_type(t);
-                self.sysfs_result(r, format!("Режим зарядки: {}", t.label()));
+                self.sysfs_result(r, format!("Battery mode: {}", t.label()));
             }
             Job::SetToggle(t, on) => {
                 let r = device::set_toggle(t, on);
-                let state = if on { "включено" } else { "выключено" };
+                let state = if on { "on" } else { "off" };
                 self.sysfs_result(r, format!("{}: {state}", t.label()));
             }
-            Job::RgbProfile(n) => self.rgb_cmd(|kb| kb.set_profile(n), format!("Профиль подсветки {n}"), Some(n)),
+            Job::RgbProfile(n) => self.rgb_cmd(|kb| kb.set_profile(n), format!("Lighting profile {n}"), Some(n)),
             Job::RgbBrightness(v) => self.rgb_cmd(|kb| kb.set_brightness(v), String::new(), None),
             Job::RgbLogo(on) => self.rgb_cmd(
                 |kb| kb.set_logo(on),
-                format!("Логотип {}", if on { "включён" } else { "выключен" }),
+                format!("Panel logo backlight {}", if on { "on" } else { "off" }),
                 None,
             ),
             Job::RgbLoad(n) => self.load_effects(n),
             Job::RgbWrite(n, effects) => {
                 self.sink.busy.set(true);
-                self.rgb_cmd(|kb| kb.set_effects(n, &effects), format!("Эффекты записаны в профиль {n}"), Some(n));
+                self.rgb_cmd(|kb| kb.set_effects(n, &effects), format!("Effects written to profile {n}"), Some(n));
                 self.sink.busy.set(false);
             }
             Job::SetAutoApply(on) => {
                 match autoapply::set_service(on) {
-                    Ok(()) if on => self.notify(NoticeKind::Success, "Автоприменение включено"),
-                    Ok(()) => self.notify(NoticeKind::Success, "Автоприменение выключено"),
-                    Err(e) => self.notify(NoticeKind::Error, format!("Служба автоприменения: {e}")),
+                    Ok(()) if on => self.notify(NoticeKind::Success, "Auto-apply enabled"),
+                    Ok(()) => self.notify(NoticeKind::Success, "Auto-apply disabled"),
+                    Err(e) => self.notify(NoticeKind::Error, format!("Auto-apply service: {e}")),
                 }
                 self.refresh_autoapply();
             }
             Job::RgbReset(n) => {
-                self.rgb_cmd(|kb| kb.reset_profile(n), format!("Профиль {n} сброшен к заводскому"), Some(n))
+                self.rgb_cmd(|kb| kb.reset_profile(n), format!("Profile {n} reset to factory"), Some(n))
+            }
+            Job::SetFlag(Flag::FanMax, on) => {
+                let r = actions::set_fan_max(on);
+                match r {
+                    Ok(_) => self.notify(NoticeKind::Success, format!("Maximum fan speed: {}", if on { "on" } else { "off" })),
+                    Err(e) => self.notify(NoticeKind::Error, format!("Maximum fan speed: {e}")),
+                }
+                self.refresh_autoapply();
+                self.refresh_sysfs();
+            }
+            Job::SetFlag(Flag::Tray, on) => {
+                // Значок держит служба — она заметит настройку в течение секунды.
+                autoapply::remember_flag(Flag::Tray, on);
+                self.notify(NoticeKind::Success, format!("Tray icon: {}", if on { "on" } else { "off" }));
+                self.refresh_autoapply();
             }
             Job::SetFlag(flag, on) => {
                 autoapply::remember_flag(flag, on);
-                let state = if on { "включено" } else { "выключено" };
+                let state = if on { "on" } else { "off" };
                 let what = match flag {
-                    Flag::FanCurve => "Программное авто вентиляторов",
-                    Flag::Rapl => "Лимиты CPU по режиму",
-                    Flag::Epp => "EPP по режиму",
+                    Flag::FanCurve => "Software fan auto",
+                    Flag::Rapl => "CPU limits per mode",
+                    Flag::Epp => "EPP per mode",
+                    Flag::FanMax | Flag::Tray => unreachable!(),
                 };
                 let mut r = Ok(());
                 if let Some(m) = power::read_state().mode {
@@ -320,6 +412,117 @@ impl Worker {
                 self.refresh_autoapply();
                 self.refresh_sysfs();
             }
+            Job::SetCpuBoost(on) => {
+                // Не через sysfs_result: его подсказка про режим «Свой» тут не к месту.
+                match actions::set_cpu_boost(on) {
+                    Ok(()) => self.notify(NoticeKind::Success, format!("CPU Boost: {}", if on { "on" } else { "off" })),
+                    Err(e) => self.notify(NoticeKind::Error, format!("CPU Boost: {e}")),
+                }
+                self.refresh_autoapply();
+                self.refresh_sysfs();
+            }
+            Job::SetNotify(kind, on) => {
+                autoapply::remember_notify(kind, on);
+                self.refresh_autoapply();
+            }
+            Job::ActivatePreset(name) => {
+                match presets::activate(&name) {
+                    Ok(_) => self.notify(NoticeKind::Success, format!("Custom Mode preset: {name}")),
+                    Err(e) => self.notify(NoticeKind::Error, format!("Preset “{name}”: {e}")),
+                }
+                self.refresh_config();
+                self.refresh_autoapply();
+                self.refresh_sysfs();
+            }
+            Job::SavePreset(name) => {
+                match presets::save_current(&name) {
+                    Ok(()) => self.notify(NoticeKind::Success, format!("Preset “{}” saved", name.trim())),
+                    Err(e) => self.notify(NoticeKind::Error, format!("Preset: {e}")),
+                }
+                self.refresh_config();
+            }
+            Job::DeletePreset(name) => {
+                match presets::delete(&name) {
+                    Ok(()) => self.notify(NoticeKind::Success, format!("Preset “{name}” deleted")),
+                    Err(e) => self.notify(NoticeKind::Error, format!("Preset: {e}")),
+                }
+                self.refresh_config();
+            }
+            Job::SaveRules(rules) => {
+                match automation::store(&rules) {
+                    Ok(()) => self.notify(NoticeKind::Success, "Actions saved"),
+                    Err(e) => self.notify(NoticeKind::Error, format!("Actions: {e}")),
+                }
+                self.refresh_config();
+            }
+            Job::RunRule(name) => self.run_rule(&name),
+            Job::RgbExport(n, path) => self.rgb_export(n, &path),
+            Job::RgbImport(n, path) => {
+                let res = std::fs::read_to_string(actions::expand_home(&path))
+                    .map_err(|e| format!("{path}: {e}"))
+                    .and_then(|t| profile_file::import(&t));
+                match res {
+                    Ok(effects) => {
+                        let count = effects.len();
+                        self.sink.busy.set(true);
+                        self.rgb_cmd(
+                            |kb| kb.set_effects(n, &effects),
+                            format!("{count} effects imported into profile {n}"),
+                            Some(n),
+                        );
+                        self.sink.busy.set(false);
+                    }
+                    Err(e) => self.notify(NoticeKind::Error, format!("Import: {e}")),
+                }
+            }
+            Job::DeactivateGpu => {
+                let list = gpu_apps::processes();
+                let n = gpu_apps::terminate(&list);
+                let kept = list.iter().filter(|p| !p.killable).count();
+                let text = match (n, kept) {
+                    (0, 0) => "No apps are using the discrete GPU".to_string(),
+                    (n, 0) => format!("Asked {n} apps to close"),
+                    (n, k) => format!("Asked {n} apps to close; {k} system processes keep the GPU awake"),
+                };
+                self.notify(NoticeKind::Success, text);
+                std::thread::sleep(Duration::from_millis(500));
+                self.sink.gpu_apps.set(gpu_apps::processes());
+            }
+        }
+    }
+
+    /// Быстрое действие из окна. Шаги идут в отдельном потоке (в них бывают
+    /// паузы); подсветке поток открывает свой дескриптор контроллера.
+    fn run_rule(&mut self, name: &str) {
+        let Some(rule) = automation::load().into_iter().find(|r| r.name == name) else {
+            return self.notify(NoticeKind::Error, format!("No action named “{name}”"));
+        };
+        let (sink, simulate) = (self.sink, self.simulate);
+        let spawned = std::thread::Builder::new().name("legion-action".into()).spawn(move || {
+            let mut ctx = actions::Ctx { kb: None, simulate };
+            match actions::run_all(&rule.steps, &mut ctx) {
+                Ok(_) => post(&sink, NoticeKind::Success, format!("Action “{}” done", rule.name)),
+                Err(e) => post(&sink, NoticeKind::Error, format!("Action “{}”: {e}", rule.name)),
+            }
+        });
+        if spawned.is_err() {
+            self.notify(NoticeKind::Error, "Could not start the action");
+        }
+    }
+
+    fn rgb_export(&mut self, n: u8, path: &str) {
+        let Some(kb) = self.kb.as_mut() else {
+            return self.notify(NoticeKind::Error, "The lighting controller is not connected");
+        };
+        let res = kb
+            .effects(n)
+            .map_err(|e| e.to_string())
+            .and_then(|e| std::fs::write(actions::expand_home(path), profile_file::export(&e)).map_err(|e| format!("{path}: {e}")));
+        // Чтение слоёв делает профиль активным — перечитать состояние.
+        self.rgb_status();
+        match res {
+            Ok(()) => self.notify(NoticeKind::Success, format!("Profile {n} exported to {path}")),
+            Err(e) => self.notify(NoticeKind::Error, format!("Export: {e}")),
         }
     }
 
@@ -386,14 +589,14 @@ impl Worker {
         match kb.effects(n) {
             Ok(e) => self.sink.rgb_effects.set_always(Some((n, e))),
             Err(e) => {
-                self.notify(NoticeKind::Error, format!("Не удалось прочитать профиль {n}: {e}"));
+                self.notify(NoticeKind::Error, format!("Could not read profile {n}: {e}"));
             }
         }
     }
 
     fn rgb_cmd(&mut self, f: impl FnOnce(&mut Keyboard) -> crate::spectrum::device::Result<()>, ok: String, reload: Option<u8>) {
         let Some(kb) = self.kb.as_mut() else {
-            return self.notify(NoticeKind::Error, "Контроллер подсветки не подключён");
+            return self.notify(NoticeKind::Error, "The lighting controller is not connected");
         };
         match f(kb) {
             Ok(()) => {
@@ -407,7 +610,7 @@ impl Worker {
                 }
             }
             Err(e) => {
-                self.notify(NoticeKind::Error, format!("Подсветка: {e}"));
+                self.notify(NoticeKind::Error, format!("Lighting: {e}"));
                 if matches!(e, KbError::NotFound | KbError::Io(_)) {
                     self.rgb_fail(e);
                 }
@@ -415,4 +618,3 @@ impl Worker {
         }
     }
 }
-

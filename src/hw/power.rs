@@ -43,21 +43,21 @@ impl PowerMode {
 
     pub fn label(self) -> &'static str {
         match self {
-            PowerMode::Quiet => "Тихий",
-            PowerMode::Balanced => "Баланс",
-            PowerMode::Performance => "Производительность",
-            PowerMode::Extreme => "Экстрим",
-            PowerMode::Custom => "Свой",
+            PowerMode::Quiet => "Quiet",
+            PowerMode::Balanced => "Balance",
+            PowerMode::Performance => "Performance",
+            PowerMode::Extreme => "Extreme",
+            PowerMode::Custom => "Custom",
         }
     }
 
     pub fn hint(self) -> &'static str {
         match self {
-            PowerMode::Quiet => "Тишина и холодный корпус, ниже производительность",
-            PowerMode::Balanced => "Автоматический баланс шума и мощности",
-            PowerMode::Performance => "Максимальная мощность для игр и работы",
-            PowerMode::Extreme => "Мощность сверх штатной, вентиляторы на пределе",
-            PowerMode::Custom => "Ваши лимиты мощности и обороты вентиляторов",
+            PowerMode::Quiet => "Quiet and a cool chassis, at the cost of performance",
+            PowerMode::Balanced => "Automatic balance between noise and power",
+            PowerMode::Performance => "Maximum power for games and work",
+            PowerMode::Extreme => "Power beyond stock, fans at their limit",
+            PowerMode::Custom => "Your own power limits and fan speeds",
         }
     }
 
@@ -178,19 +178,89 @@ fn attrs_dir() -> Option<PathBuf> {
     .map(|d| d.join("attributes"))
 }
 
-/// Подписи известных атрибутов: (название, пояснение, единица).
+/// Порядок атрибутов на странице: сначала CPU, потом GPU — как в
+/// Lenovo Legion Toolkit. Неизвестные уходят в конец по алфавиту.
+const ORDER: [&str; 12] = [
+    "ppt_pl1_spl",
+    "ppt_pl2_sppt",
+    "ppt_pl3_fppt",
+    "ppt_cpu_cl",
+    "ppt_pl1_tau",
+    "ppt_pl1_apu_spl",
+    "cpu_temp",
+    "gpu_nv_ctgp",
+    "gpu_nv_ppab",
+    "gpu_nv_cpu_boost",
+    "gpu_nv_ac_offset",
+    "gpu_temp",
+];
+
+/// Подписи известных атрибутов: (название, пояснение, единица). Названия и
+/// пояснения взяты из Lenovo Legion Toolkit (окно Custom Mode), чтобы на
+/// обеих системах они читались одинаково; имена атрибутов и единицы сверены
+/// с `display_name` драйвера `lenovo-wmi-other` на Legion Pro 7 16IAX10H.
 fn describe(name: &str) -> Option<(&'static str, &'static str, &'static str)> {
     Some(match name {
-        "ppt_pl1_spl" => ("CPU: длительная мощность (PL1)", "Мощность, которую процессор держит неограниченно долго.", "Вт"),
-        "ppt_pl2_sppt" => ("CPU: кратковременная мощность (PL2)", "Всплеск мощности на десятки секунд под нагрузкой.", "Вт"),
-        "ppt_pl3_fppt" => ("CPU: пиковая мощность (PL3)", "Короткие пики в миллисекунды.", "Вт"),
-        "ppt_pl1_apu_spl" => ("APU: длительная мощность", "Лимит мощности встроенной графики.", "Вт"),
-        "cpu_temp" => ("CPU: температурный предел", "Температура, при которой процессор сбрасывает частоту.", "°C"),
-        "gpu_temp" => ("GPU: температурный предел", "Температура, при которой видеокарта сбрасывает частоту.", "°C"),
-        "gpu_nv_ctgp" => ("GPU: настраиваемый TGP", "Базовая мощность видеокарты NVIDIA.", "Вт"),
-        "gpu_nv_ppab" => ("GPU: Dynamic Boost", "Мощность, которую видеокарта забирает у процессора.", "Вт"),
-        "gpu_nv_tpp" => ("GPU: полная мощность", "Суммарный лимит видеокарты.", "Вт"),
-        "gpu_nv_cpu_boost" => ("GPU: буст при нагрузке CPU", "", "Вт"),
+        "ppt_pl1_spl" => (
+            "Long Term Power Limit",
+            "The maximum power the CPU is allowed to sustain indefinitely under long workloads.",
+            "W",
+        ),
+        "ppt_pl2_sppt" => (
+            "Short Term Power Limit",
+            "The maximum power the CPU is allowed to draw for brief bursts of high activity.",
+            "W",
+        ),
+        "ppt_pl3_fppt" => (
+            "Peak Power Limit",
+            "The absolute limit for instantaneous power spikes to protect the voltage regulator.",
+            "W",
+        ),
+        "ppt_cpu_cl" => (
+            "Long Term Power Limit (Cross Loading)",
+            "The sustained power limit applied to the CPU when the GPU is also under heavy load.",
+            "W",
+        ),
+        "ppt_pl1_tau" => (
+            "Short Term Power Limit Duration",
+            "How long the CPU may stay above the long term limit before dropping back to it.",
+            "s",
+        ),
+        "ppt_pl1_apu_spl" => (
+            "APU sPPT Power Limit",
+            "The slow package power tracking limit of an AMD APU package.",
+            "W",
+        ),
+        "cpu_temp" => (
+            "CPU Temperature Limit",
+            "The target temperature threshold at which the CPU will begin thermal throttling.",
+            "°C",
+        ),
+        "gpu_nv_ctgp" => (
+            "Configurable TGP",
+            "The base sustained power limit allocated to the GPU, excluding dynamic boost headroom.",
+            "W",
+        ),
+        "gpu_nv_ppab" => (
+            "Dynamic Boost",
+            "The extra power handed to the GPU from the CPU's budget during high graphics demand.",
+            "W",
+        ),
+        "gpu_nv_cpu_boost" => (
+            "GPU to CPU Dynamic Boost",
+            "The extra power the CPU may borrow from the GPU's budget.",
+            "W",
+        ),
+        "gpu_nv_ac_offset" => (
+            "Total Processing Power Target on AC",
+            "The CPU power threshold that triggers dynamic power adjustments for the GPU on AC power.",
+            "W",
+        ),
+        "gpu_temp" => (
+            "GPU Temperature Limit",
+            "The target temperature threshold at which the GPU will begin thermal throttling.",
+            "°C",
+        ),
         _ => return None,
     })
 }
@@ -225,7 +295,8 @@ pub fn read_tunables() -> Vec<Tunable> {
             })
         })
         .collect();
-    out.sort_by(|a, b| a.name.cmp(&b.name));
+    let rank = |n: &str| ORDER.iter().position(|x| *x == n).unwrap_or(ORDER.len());
+    out.sort_by(|a, b| rank(&a.name).cmp(&rank(&b.name)).then_with(|| a.name.cmp(&b.name)));
     out
 }
 

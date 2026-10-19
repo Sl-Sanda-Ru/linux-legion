@@ -23,13 +23,16 @@ fn hwmon() -> Option<PathBuf> {
     sysfs::find_dir("/sys/class/hwmon", |p| sysfs::read(&p.join("name")).as_deref() == Some("lenovo_wmi_other"))
 }
 
+/// Номера вентиляторов совпадают с идентификаторами возможностей Lenovo,
+/// которые использует Legion Toolkit: 0x04030001 — CPU, 0x04030002 — GPU,
+/// 0x04030004 — PCH. На Legion Pro 7 16IAX10H драйвер отдаёт fan1, fan2, fan4.
 fn label(index: u8) -> &'static str {
     match index {
-        1 => "Процессор",
-        2 => "Видеокарта",
-        3 => "Дополнительный",
-        4 => "Системный",
-        _ => "Вентилятор",
+        1 => "CPU",
+        2 => "GPU",
+        3 => "Auxiliary",
+        4 => "PCH",
+        _ => "Fan",
     }
 }
 

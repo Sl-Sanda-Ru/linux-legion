@@ -1,9 +1,11 @@
 //! Устройство: аппаратные переключатели и сведения о системе.
 
 use crate::hw::device::Toggle as Switch;
+use crate::autoapply::Flag;
+use crate::notify;
 use crate::ui::app::AppCtx;
 use crate::ui::icons;
-use crate::ui::widgets::{access_banner, card, kv, page_header, reactive, reactive_box, setting_row};
+use crate::ui::widgets::{access_banner, card, card_with, kv, page_header, reactive, reactive_box, setting_row};
 use crate::worker::Job;
 use syngui::prelude::*;
 
@@ -16,15 +18,15 @@ fn toggle_icon(t: Switch) -> &'static str {
 }
 
 pub fn view(ctx: AppCtx) -> impl Widget {
-    let (c_t, c_i) = (ctx.clone(), ctx);
+    let (c_t, c_i, c_n) = (ctx.clone(), ctx.clone(), ctx);
     Column::new()
         .gap(18.0)
         .cross_axis_alignment(CrossAxisAlignment::Stretch)
-        .child(page_header("Устройство", "Аппаратные переключатели и сведения о ноутбуке."))
+        .child(page_header("Device", "Hardware switches and laptop information."))
         .child(reactive_box(move || {
             let t = c_t.sink.toggles.get();
             if t.items.is_empty() {
-                return Box::new(card("Переключатели", "", Text::new("Драйвер ideapad_acpi не найден.").class("muted")));
+                return Box::new(card("Switches", "", Text::new("The ideapad_acpi driver was not found.").class("muted")));
             }
             let mut col = Column::new().gap(18.0).cross_axis_alignment(CrossAxisAlignment::Stretch);
             if t.items.iter().any(|i| !i.2) {
@@ -58,10 +60,11 @@ pub fn view(ctx: AppCtx) -> impl Widget {
                         ),
                 );
             }
-            Box::new(col.child(card("Переключатели", "", rows)))
+            Box::new(col.child(card("Switches", "", rows)))
         }))
+        .child(notifications(c_n))
         .child(card(
-            "О системе",
+            "System information",
             "",
             reactive(move || {
                 let i = c_i.sink.info.get();
@@ -69,15 +72,50 @@ pub fn view(ctx: AppCtx) -> impl Widget {
                 Column::new()
                     .gap(2.0)
                     .cross_axis_alignment(CrossAxisAlignment::Stretch)
-                    .child(kv("Модель", format!("{} {}", i.vendor, i.model)))
-                    .child(kv("Машинный тип", i.machine_type.clone()))
+                    .child(kv("Model", format!("{} {}", i.vendor, i.model)))
+                    .child(kv("Machine type", i.machine_type.clone()))
                     .child(kv("BIOS", format!("{} ({})", i.bios, i.bios_date)))
-                    .child(kv("Процессор", format!("{} · {} потоков", i.cpu, i.cpu_threads)))
-                    .child(kv("Видеокарта", if i.gpu.is_empty() { "—".into() } else { i.gpu.clone() }))
-                    .child(kv("Память", format!("{:.1} ГБ", i.memory_gb)))
-                    .child(kv("Контроллер подсветки", if rgb.name.is_empty() { "—".into() } else { rgb.name.clone() }))
-                    .child(kv("Система", format!("{} · ядро {}", i.os, i.kernel)))
+                    .child(kv("CPU", format!("{} · {} threads", i.cpu, i.cpu_threads)))
+                    .child(kv("GPU", if i.gpu.is_empty() { "—".into() } else { i.gpu.clone() }))
+                    .child(kv("Memory", format!("{:.1} GB", i.memory_gb)))
+                    .child(kv("Lighting controller", if rgb.name.is_empty() { "—".into() } else { rgb.name.clone() }))
+                    .child(kv("System", format!("{} · kernel {}", i.os, i.kernel)))
             }),
         ))
         .class("page")
+}
+
+/// Уведомления рабочего стола, которые показывает служба.
+fn notifications(ctx: AppCtx) -> impl Widget {
+    card_with(
+        icons::NOTIFICATIONS,
+        "Tray and notifications",
+        || Text::new("").class("card-hint"),
+        reactive(move || {
+            let (svc, saved) = ctx.sink.autoapply.get();
+            let mut col = Column::new().gap(16.0).cross_axis_alignment(CrossAxisAlignment::Stretch);
+            let note = if svc.enabled && svc.active {
+                "The linux-legion service shows these on the desktop."
+            } else {
+                "The linux-legion service shows these on the desktop — turn it on on the Performance page."
+            };
+            col = col.child(Text::new(note).class("row-desc"));
+            let c_tray = ctx.clone();
+            col = col.child(setting_row(
+                "Tray icon",
+                "Power mode, presets, CPU Boost, fans, battery mode, keyboard profiles and quick actions in \
+                 one menu. In GNOME it needs the AppIndicator extension.",
+                Box::new(Toggle::new().on(saved.tray).on_change(move |v| c_tray.send(Job::SetFlag(Flag::Tray, v)))),
+            ));
+            for kind in notify::Kind::ALL {
+                let c = ctx.clone();
+                col = col.child(setting_row(
+                    kind.label(),
+                    kind.hint(),
+                    Box::new(Toggle::new().on(saved.notifies(kind)).on_change(move |v| c.send(Job::SetNotify(kind, v)))),
+                ));
+            }
+            col
+        }),
+    )
 }

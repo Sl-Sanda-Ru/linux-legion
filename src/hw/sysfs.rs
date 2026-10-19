@@ -35,9 +35,9 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::Permission(p) => write!(f, "нет прав на запись {} — установите udev-правило", p.display()),
-            Error::NotFound(p) => write!(f, "{} не найден", p.display()),
-            Error::Rejected(p, e) => write!(f, "драйвер отклонил значение ({}): {e}", p.display()),
+            Error::Permission(p) => write!(f, "no permission to write {} — install the udev rule", p.display()),
+            Error::NotFound(p) => write!(f, "{} not found", p.display()),
+            Error::Rejected(p, e) => write!(f, "the driver rejected the value ({}): {e}", p.display()),
             Error::Io(p, e) => write!(f, "{}: {e}", p.display()),
         }
     }
