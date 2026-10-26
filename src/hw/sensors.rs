@@ -13,6 +13,8 @@ pub struct Sensors {
     /// Загрузка 0…100.
     pub cpu_load: f32,
     pub cpu_mhz: Option<u32>,
+    /// Мощность пакета CPU, Вт (по счётчику энергии RAPL).
+    pub cpu_power_w: Option<f32>,
     pub mem_used_gb: f32,
     pub mem_total_gb: f32,
     pub gpu: Gpu,
@@ -41,6 +43,8 @@ pub struct GpuStats {
 #[derive(Default)]
 pub struct Sampler {
     prev: Option<(u64, u64)>,
+    /// Предыдущее чтение счётчика энергии RAPL (мкДж) и его момент.
+    prev_energy: Option<(u64, std::time::Instant)>,
 }
 
 impl Sampler {
@@ -50,10 +54,26 @@ impl Sampler {
             cpu_temp: cpu_temp(),
             cpu_load: self.cpu_load(),
             cpu_mhz: cpu_mhz(),
+            cpu_power_w: self.cpu_power_w(),
             mem_used_gb: used,
             mem_total_gb: total,
             gpu: if with_gpu { gpu() } else { Gpu::Absent },
         }
+    }
+
+    /// Мощность пакета CPU по разнице счётчика энергии между вызовами.
+    /// Первый вызов задаёт точку отсчёта и возвращает `None`.
+    fn cpu_power_w(&mut self) -> Option<f32> {
+        let (energy, max) = super::rapl::package_energy_uj()?;
+        let now = std::time::Instant::now();
+        let watts = self.prev_energy.and_then(|(pe, pt)| {
+            let dt = now.duration_since(pt).as_secs_f64();
+            // Счётчик монотонно растёт и переполняется по кругу на `max`.
+            let delta = if energy >= pe { energy - pe } else { max - pe + energy };
+            (dt > 0.0).then(|| (delta as f64 / 1e6 / dt) as f32)
+        });
+        self.prev_energy = Some((energy, now));
+        watts
     }
 
     fn cpu_load(&mut self) -> f32 {
@@ -95,18 +115,17 @@ fn cpu_temp() -> Option<f32> {
     best
 }
 
-/// Средняя текущая частота ядер.
+/// Частота самого быстрого ядра в данный момент (пиковый буст).
 fn cpu_mhz() -> Option<u32> {
     let rd = std::fs::read_dir(sysfs::sys("/sys/devices/system/cpu")).ok()?;
-    let freqs: Vec<u64> = rd
-        .flatten()
+    rd.flatten()
         .filter(|e| {
             let n = e.file_name().to_string_lossy().into_owned();
             n.starts_with("cpu") && n[3..].chars().all(|c| c.is_ascii_digit()) && n.len() > 3
         })
         .filter_map(|e| sysfs::read_num::<u64>(&e.path().join("cpufreq/scaling_cur_freq")))
-        .collect();
-    (!freqs.is_empty()).then(|| (freqs.iter().sum::<u64>() / freqs.len() as u64 / 1000) as u32)
+        .max()
+        .map(|khz| (khz / 1000) as u32)
 }
 
 fn memory() -> (f32, f32) {

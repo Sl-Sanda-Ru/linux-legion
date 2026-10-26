@@ -143,6 +143,7 @@ fn cpu_card(ctx: AppCtx) -> impl Widget {
             .child(line("Load", format!("{:.0} %", s.cpu_load)))
             .child(bar(s.cpu_load / 100.0, "accent"))
             .child(line("Clock", s.cpu_mhz.map_or("—".into(), |m| format!("{:.2} GHz", m as f32 / 1000.0))))
+            .child(line("Power", s.cpu_power_w.map_or("—".into(), |w| format!("{w:.1} W"))))
             .children(vec![boost_row(&ctx)]);
         stat_card(icons::MEMORY, "CPU", Box::new(body))
     })

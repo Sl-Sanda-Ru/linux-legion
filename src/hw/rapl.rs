@@ -55,6 +55,16 @@ fn pl_path(zone: &PathBuf, idx: u8) -> PathBuf {
     zone.join(format!("constraint_{idx}_power_limit_uw"))
 }
 
+/// Накопленная энергия пакета CPU и диапазон счётчика (для учёта
+/// переполнения), мкДж. Берём MSR-зону `intel-rapl:0` — у MMIO нет
+/// `energy_uj`. Мощность (Вт) считается по разнице двух чтений во времени.
+pub fn package_energy_uj() -> Option<(u64, u64)> {
+    let (zone, _) = zones().into_iter().find(|(_, mmio)| !*mmio)?;
+    let energy = sysfs::read_num::<u64>(&zone.join("energy_uj"))?;
+    let max = sysfs::read_num::<u64>(&zone.join("max_energy_range_uj")).unwrap_or(u64::MAX);
+    Some((energy, max))
+}
+
 fn read_zone(zone: &PathBuf) -> Option<Limits> {
     let pl1 = sysfs::read_num::<u64>(&pl_path(zone, 0))?;
     let pl2 = sysfs::read_num::<u64>(&pl_path(zone, 1)).unwrap_or(pl1);
